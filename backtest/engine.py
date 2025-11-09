@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from pathlib import Path
 from typing import Any, Dict, Optional, Type
 
@@ -47,30 +48,87 @@ def run_backtest(
     bt.plot(open_browser=False, filename=str(plot_path))
 
     summary = {
-        "win_rate": stats.get("Win Rate [%]", 0.0),
-        "profit_factor": stats.get("Profit Factor", 0.0),
-        "expectancy": stats.get("Expectancy [%]", 0.0),
-        "max_drawdown": stats.get("Max Drawdown [%]", 0.0),
+        "win_rate": _safe_metric(stats, "Win Rate [%]"),
+        "profit_factor": _safe_metric(stats, "Profit Factor"),
+        "expectancy": _safe_metric(stats, "Expectancy [%]"),
+        "max_drawdown": _safe_drawdown(stats),
         "trades_path": str(trades_path),
         "equity_curve_path": str(equity_path),
         "plot_path": str(plot_path),
     }
 
-    _print_summary(summary)
+    _print_summary(stats, summary)
     return summary
 
 
-def _print_summary(summary: Dict[str, Any]) -> None:
-    """Print concise backtest summary."""
+def _print_summary(stats: Dict[str, Any], summary_paths: Dict[str, Any]) -> None:
+    """Print extended backtest summary."""
+    metrics = [
+        ("Start", stats.get("Start")),
+        ("End", stats.get("End")),
+        ("Duration", stats.get("Duration")),
+        ("Exposure Time [%]", _safe_metric(stats, "Exposure Time [%]")),
+        ("Equity Final [$]", _safe_metric(stats, "Equity Final [$]")),
+        ("Equity Peak [$]", _safe_metric(stats, "Equity Peak [$]")),
+        ("Return [%]", _safe_metric(stats, "Return [%]")),
+        ("Buy & Hold Return [%]", _safe_metric(stats, "Buy & Hold Return [%]")),
+        ("Return (Ann.) [%]", _safe_metric(stats, "Return (Ann.) [%]")),
+        ("Volatility (Ann.) [%]", _safe_metric(stats, "Volatility (Ann.) [%]")),
+        ("Sharpe Ratio", _safe_metric(stats, "Sharpe Ratio")),
+        ("Sortino Ratio", _safe_metric(stats, "Sortino Ratio")),
+        ("Calmar Ratio", _safe_metric(stats, "Calmar Ratio")),
+        ("Max Drawdown [%]", -_safe_drawdown(stats)),
+        ("Avg. Drawdown [%]", _safe_metric(stats, "Avg. Drawdown [%]")),
+        ("Max Drawdown Duration", stats.get("Max. Drawdown Duration")),
+        ("Avg. Drawdown Duration", stats.get("Avg. Drawdown Duration")),
+        ("# Trades", _safe_metric(stats, "# Trades")),
+        ("Win Rate [%]", _safe_metric(stats, "Win Rate [%]")),
+        ("Best Trade [%]", _safe_metric(stats, "Best Trade [%]")),
+        ("Worst Trade [%]", _safe_metric(stats, "Worst Trade [%]")),
+        ("Avg. Trade [%]", _safe_metric(stats, "Avg. Trade [%]")),
+        ("Max Trade Duration", stats.get("Max. Trade Duration")),
+        ("Avg. Trade Duration", stats.get("Avg. Trade Duration")),
+        ("Profit Factor", _safe_metric(stats, "Profit Factor")),
+        ("Expectancy [%]", _safe_metric(stats, "Expectancy [%]")),
+        ("SQN", _safe_metric(stats, "SQN")),
+    ]
+
     print("Backtest Summary")
     print("================")
-    print(f"Win Rate        : {summary['win_rate']:.2f}%")
-    print(f"Profit Factor   : {summary['profit_factor']:.2f}")
-    print(f"Expectancy      : {summary['expectancy']:.2f}%")
-    print(f"Max Drawdown    : {summary['max_drawdown']:.2f}%")
-    print(f"Trades CSV      : {summary['trades_path']}")
-    print(f"Equity Curve CSV: {summary['equity_curve_path']}")
-    print(f"Plot HTML       : {summary['plot_path']}")
+    for label, value in metrics:
+        if isinstance(value, (pd.Timestamp, pd.Timedelta)):
+            print(f"{label:<24}: {value}")
+        elif isinstance(value, (int, float)):
+            print(f"{label:<24}: {value:.6g}")
+        elif value is None:
+            print(f"{label:<24}: -")
+        else:
+            print(f"{label:<24}: {value}")
+
+    print("----------------")
+    print(f"Trades CSV      : {summary_paths['trades_path']}")
+    print(f"Equity Curve CSV: {summary_paths['equity_curve_path']}")
+    print(f"Plot HTML       : {summary_paths['plot_path']}")
+
+
+def _safe_metric(stats: Dict[str, Any], key: str) -> float:
+    """Return stat value or zero if missing/NaN."""
+    value = stats.get(key, 0.0)
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    if math.isnan(numeric):
+        return 0.0
+    return numeric
+
+
+def _safe_drawdown(stats: Dict[str, Any]) -> float:
+    """Return absolute max drawdown percentage, handling alternate keys."""
+    primary = _safe_metric(stats, "Max Drawdown [%]")
+    if primary == 0.0:
+        primary = _safe_metric(stats, "Max. Drawdown [%]")
+    return abs(primary)
 
 
 def _prepare_dataset(data: pd.DataFrame) -> pd.DataFrame:
