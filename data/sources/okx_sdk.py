@@ -25,12 +25,26 @@ class OkxSDKDataSource(MarketDataSource):
         max_total: int = 3000,
         sleep_seconds: float = 0.2,
     ) -> None:
+        self._fetch_method = None
         try:
             from okx.api import Market  # type: ignore
-        except ImportError as exc:  # pragma: no cover
-            raise ImportError("okx package is required for OkxSDKDataSource. Install via pip install okx.") from exc
 
-        self._market_api = Market(flag=flag)
+            self._market_api = Market(flag=flag)
+            self._fetch_method = getattr(self._market_api, "get_candles", None)
+        except ImportError:
+            try:
+                from okx.MarketData import MarketAPI  # type: ignore
+
+                self._market_api = MarketAPI(flag=flag)
+                self._fetch_method = getattr(self._market_api, "get_candlesticks", None)
+            except ImportError as exc:  # pragma: no cover
+                raise ImportError(
+                    "okx package is required for OkxSDKDataSource. Install via pip install python-okx."
+                ) from exc
+
+        if self._fetch_method is None:
+            raise AttributeError("Unable to locate candle fetch method on okx SDK.")
+
         self._inst_type = inst_type.upper()
         self._max_batch = max_batch
         self._max_total = max_total
@@ -58,7 +72,7 @@ class OkxSDKDataSource(MarketDataSource):
             if next_after is not None:
                 params["after"] = next_after
 
-            response = self._market_api.get_candles(**params)
+            response = self._fetch_method(**params)
             batch = response.get("data", []) or []
             if not batch:
                 break
