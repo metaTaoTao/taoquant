@@ -29,7 +29,7 @@ class CacheConfig:
 class BacktestConfig:
     """Configuration for backtesting defaults."""
 
-    initial_capital: float = 10000.0
+    initial_capital: float = 200000.0
     commission: float = 0.001
     slippage: float = 0.0005
 

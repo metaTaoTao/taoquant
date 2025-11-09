@@ -3,13 +3,14 @@ from __future__ import annotations
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, Optional
+from typing import Any, Dict, Iterable, Optional, Tuple
 
 import pandas as pd
 import requests
 
 from core.config import default_config
 from data.schemas import COLUMNS_OHLCV
+from data.sources import MarketDataSource
 from utils.csv_loader import load_csv_ohlcv
 from utils.timeframes import timeframe_to_minutes
 
@@ -17,9 +18,17 @@ from utils.timeframes import timeframe_to_minutes
 class DataManager:
     """Unified market data interface with caching support."""
 
+    EXTERNAL_SOURCE_MAP: Dict[str, Tuple[str, str]] = {
+        "okx": ("data.sources.okx_sdk", "OkxSDKDataSource"),
+        "binance": ("data.sources.binance_sdk", "BinanceSDKDataSource"),
+        "okx_sdk": ("data.sources.okx_sdk", "OkxSDKDataSource"),
+        "binance_sdk": ("data.sources.binance_sdk", "BinanceSDKDataSource"),
+    }
+
     def __init__(self, config: Optional[Any] = None) -> None:
         self.config = config or default_config
         self.cache_config = self.config.cache
+        self._external_sources: Dict[str, MarketDataSource] = {}
 
     def get_klines(
         self,
@@ -40,10 +49,9 @@ class DataManager:
             if not cached_df.empty:
                 return cached_df
 
-        if source == "okx":
-            data = self._fetch_okx(symbol, timeframe, start, end)
-        elif source == "binance":
-            data = self._fetch_binance(symbol, timeframe, start, end)
+        if source in self.EXTERNAL_SOURCE_MAP:
+            handler = self._load_external_source(source)
+            data = handler.get_klines(symbol, timeframe, start=start, end=end)
         elif source == "csv":
             data = load_csv_ohlcv(symbol=symbol, timeframe=timeframe, start=start, end=end)
         else:
@@ -107,7 +115,7 @@ class DataManager:
         endpoint = "/api/v5/market/candles"
         params: Dict[str, Any] = {
             "instId": self._format_okx_symbol(symbol),
-            "bar": timeframe,
+            "bar": self._map_okx_timeframe(timeframe),
             "limit": 100,
         }
         if end:
@@ -197,9 +205,25 @@ class DataManager:
     @staticmethod
     def _normalize_okx(raw_data: Iterable[Iterable[str]]) -> pd.DataFrame:
         """Transform OKX candle payload into standard OHLCV dataframe."""
-        columns = ["ts", "open", "high", "low", "close", "volume", "volume_ccy"]
-        df = pd.DataFrame(list(raw_data), columns=columns)
-        df["ts"] = pd.to_datetime(df["ts"], unit="ms", utc=True)
+        df = pd.DataFrame(list(raw_data))
+        if df.empty:
+            return pd.DataFrame(columns=COLUMNS_OHLCV)
+
+        rename_map = {
+            0: "ts",
+            1: "open",
+            2: "high",
+            3: "low",
+            4: "close",
+            5: "volume",
+        }
+        df = df.rename(columns=rename_map)
+        required_cols = ["ts", "open", "high", "low", "close", "volume"]
+        missing = [col for col in required_cols if col not in df.columns]
+        if missing:
+            raise ValueError(f"OKX payload missing required columns: {missing}")
+
+        df["ts"] = pd.to_datetime(df["ts"].astype("int64"), unit="ms", utc=True)
         df = df.set_index("ts")
         df = df.astype(
             {
@@ -259,12 +283,16 @@ class DataManager:
     @staticmethod
     def _format_okx_symbol(symbol: str) -> str:
         """Convert generic symbol to OKX instrument identifier."""
-        if "-" in symbol:
-            return symbol.upper()
-        if "/" in symbol:
-            base, quote = symbol.upper().split("/")
+        upper = symbol.upper()
+        if "-" in upper:
+            return upper
+        if "/" in upper:
+            base, quote = upper.split("/")
             return f"{base}-{quote}"
-        return f"{symbol.upper()}-USDT"
+        if upper.endswith("USDT"):
+            base = upper[:-4]
+            return f"{base}-USDT"
+        return f"{upper}-USDT"
 
     @staticmethod
     def _to_utc(dt: datetime) -> pd.Timestamp:
@@ -275,4 +303,20 @@ class DataManager:
         else:
             ts = ts.tz_convert(timezone.utc)
         return ts
+
+    def _load_external_source(self, name: str) -> MarketDataSource:
+        """Dynamically load and cache external data source implementations."""
+        if name in self._external_sources:
+            return self._external_sources[name]
+        module_name, class_name = self.EXTERNAL_SOURCE_MAP[name]
+        try:
+            module = __import__(module_name, fromlist=[class_name])
+            cls = getattr(module, class_name)
+        except ImportError as exc:  # pragma: no cover
+            raise ImportError(f"Failed to import data source '{name}'. Ensure required package is installed.") from exc
+        instance = cls()
+        if not isinstance(instance, MarketDataSource):
+            raise TypeError(f"Data source '{name}' must inherit from MarketDataSource.")
+        self._external_sources[name] = instance
+        return instance
 

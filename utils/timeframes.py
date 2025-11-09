@@ -14,6 +14,7 @@ TIMEFRAME_TO_MINUTES: Dict[str, int] = {
     "6h": 360,
     "12h": 720,
     "1d": 1440,
+    "3d": 4320,
     "1w": 10080,
     "1mth": 43200,
     "1month": 43200,
@@ -21,6 +22,7 @@ TIMEFRAME_TO_MINUTES: Dict[str, int] = {
 
 ALIASES: Dict[str, str] = {
     "1M": "1mth",
+    "3D": "3d",
 }
 
 _NORMALIZED_MAP: Dict[str, int] = {}

@@ -25,8 +25,10 @@ def run_backtest(
     output_dir.mkdir(parents=True, exist_ok=True)
     strategy_params = strategy_params or {}
 
+    dataset = _prepare_dataset(data)
+
     bt = Backtest(
-        data,
+        dataset,
         strategy_cls,
         cash=cfg.backtest.initial_capital,
         commission=cfg.backtest.commission,
@@ -38,9 +40,11 @@ def run_backtest(
 
     trades_path = output_dir / "trades.csv"
     equity_path = output_dir / "equity_curve.csv"
+    plot_path = output_dir / "backtest_plot.html"
 
     stats["_trades"].to_csv(trades_path, index=False)
     stats["_equity_curve"].to_csv(equity_path, index=False)
+    bt.plot(open_browser=False, filename=str(plot_path))
 
     summary = {
         "win_rate": stats.get("Win Rate [%]", 0.0),
@@ -49,6 +53,7 @@ def run_backtest(
         "max_drawdown": stats.get("Max Drawdown [%]", 0.0),
         "trades_path": str(trades_path),
         "equity_curve_path": str(equity_path),
+        "plot_path": str(plot_path),
     }
 
     _print_summary(summary)
@@ -65,4 +70,26 @@ def _print_summary(summary: Dict[str, Any]) -> None:
     print(f"Max Drawdown    : {summary['max_drawdown']:.2f}%")
     print(f"Trades CSV      : {summary['trades_path']}")
     print(f"Equity Curve CSV: {summary['equity_curve_path']}")
+    print(f"Plot HTML       : {summary['plot_path']}")
+
+
+def _prepare_dataset(data: pd.DataFrame) -> pd.DataFrame:
+    """Ensure dataframe conforms to Backtesting.py requirements."""
+    if data.empty:
+        raise ValueError("Input data for backtest is empty.")
+
+    required_columns = ["open", "high", "low", "close"]
+    lower_columns = [col.lower() for col in data.columns]
+    missing = [col for col in required_columns if col not in lower_columns]
+    if missing:
+        raise ValueError(f"Input data missing required columns: {missing}")
+
+    df = data.copy()
+    rename_map = {col: col.title() for col in df.columns}
+    df = df.rename(columns=rename_map)
+
+    if df.index.tz is not None:
+        df.index = df.index.tz_convert(None)
+
+    return df
 
