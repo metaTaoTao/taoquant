@@ -60,7 +60,7 @@ class DataManager:
         if data.empty:
             raise ValueError(f"No data received for {symbol} {timeframe} via {source}.")
 
-        if use_cache and self.cache_config.enabled:
+        if self.cache_config.enabled:
             self._store_cache(cache_path, data)
 
         return data

@@ -17,12 +17,19 @@ REQUIRED_KEYS = ("symbol", "timeframe", "strategy")
 run_config: Dict[str, Any] = {
     "symbol": "BTCUSDT",
     "timeframe": "15m",
-    "strategy": "sma_cross",
+    "strategy": "sr_guard",
     "source": "okx",
     "start": None,
     "end": None,
     "lookback_days": 30,
     "output": "backtest/results",
+    "strategy_params": {
+        "lookback_period": 20,
+        "box_width_mult": 1.0,
+        "entry_buffer_pct": 0.001,
+        "stop_atr_multiple": 3.0,
+        "trade_size": 1.0,
+    },
 }
 
 
@@ -47,6 +54,7 @@ def _normalize_config(config: Dict[str, Any]) -> Dict[str, Any]:
         "end": config.get("end"),
         "lookback_days": config.get("lookback_days"),
         "output": config.get("output", "backtest/results"),
+        "strategy_params": config.get("strategy_params", {}),
     }
     if not normalized["start"] and not normalized["end"]:
         lookback_days = normalized.get("lookback_days") or 30
@@ -71,7 +79,13 @@ def _execute(config: Dict[str, Any]) -> None:
 
     strategy_cls = _resolve_strategy(config["strategy"])
     output_dir = Path(config["output"])
-    run_backtest(data, strategy_cls, config=default_config, output_dir=output_dir)
+    run_backtest(
+        data,
+        strategy_cls,
+        config=default_config,
+        output_dir=output_dir,
+        strategy_params=config.get("strategy_params", {}),
+    )
 
 
 def _resolve_strategy(name: str) -> Type[Strategy]:

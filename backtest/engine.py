@@ -42,10 +42,29 @@ def run_backtest(
     trades_path = output_dir / "trades.csv"
     equity_path = output_dir / "equity_curve.csv"
     plot_path = output_dir / "backtest_plot.html"
+    guard_path = output_dir / "guard_rails.csv"
+    guard_orders_path = output_dir / "guard_orders.csv"
 
     stats["_trades"].to_csv(trades_path, index=False)
     stats["_equity_curve"].to_csv(equity_path, index=False)
     bt.plot(open_browser=False, filename=str(plot_path))
+
+    strategy_instance = stats.get("_strategy")
+    guard_columns = []
+    guard_written = False
+    orders_written = False
+    if strategy_instance is not None and hasattr(strategy_instance, "data"):
+        guard_df = strategy_instance.data.df.copy()
+        guard_columns = [col for col in ["support_guard", "resistance_guard", "atr_guard"] if col in guard_df.columns]
+        if guard_columns:
+            guard_export = guard_df[guard_columns].reset_index().rename(columns={"index": "Time"})
+            guard_export.to_csv(guard_path, index=False)
+            guard_written = True
+        if hasattr(strategy_instance, "_order_log"):
+            orders_df = pd.DataFrame(strategy_instance._order_log)
+            if not orders_df.empty:
+                orders_df.to_csv(guard_orders_path, index=False)
+                orders_written = True
 
     summary = {
         "win_rate": _safe_metric(stats, "Win Rate [%]"),
@@ -55,6 +74,8 @@ def run_backtest(
         "trades_path": str(trades_path),
         "equity_curve_path": str(equity_path),
         "plot_path": str(plot_path),
+        "guard_rails_path": str(guard_path) if guard_written else None,
+        "guard_orders_path": str(guard_orders_path) if orders_written else None,
     }
 
     _print_summary(stats, summary)
