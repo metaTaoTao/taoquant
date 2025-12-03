@@ -1,0 +1,265 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © ChartPrime & User Customized
+// 抗插针版 + 2B反转识别 + 黑色背景适配
+
+//@version=5
+indicator("SR空单指标v1", shorttitle="SR空单指标v1", overlay=true, max_boxes_count=500, max_labels_count=500)
+
+// ---------------------------------------------------------------------------------------------------------------------}
+// 🎛️ 参数设置
+// ---------------------------------------------------------------------------------------------------------------------{
+group_trade = "Trade Logic (核心止损优化)"
+// 🔥 核心优化 1：抗插针开关
+bool  use_close_sl = input.bool(true, "Activate Anti-Wick Mode (开启抗插针实体止损)", group=group_trade, tooltip="✅ 开启后：只有当 K线实体收盘价 > 止损价 时才止损。能扛住影线假突破。\n🛡️ 安全机制：为了防止暴拉，如果 High 超过 [止损价 + 1.0 ATR] 会强制止损。")
+// 🔥 核心优化 2：最大尝试次数
+int   max_retries  = input.int(3, "Max Retries per Zone (单区最大尝试次数)", minval=1, group=group_trade, tooltip="同一个阻力区，如果连续止损超过 N 次，就不再给信号了，防止反复打脸。")
+float sl_atr_mult  = input.float(1.0, "Stop Loss Buffer (ATR倍数)", step=0.1, group=group_trade)
+bool  show_all_info= input.bool(false, "Show All History (复盘模式)", group=group_trade)
+
+group_rule = "Structure (结构定义)"
+int   leftLen     = input.int(90, "Pivot Lookback (左侧K线)", minval=10, group=group_rule) 
+int   rightLen    = input.int(10, "Confirmation (右侧确认)", minval=2, group=group_rule)
+float merge_atr   = input.float(3.5, "Merge Threshold (合并力度)", step=0.1, group=group_rule)
+// 🔥 新增：破坏容忍度
+float break_tol   = input.float(0.5, "Break Tolerance ATR (破坏容忍度)", step=0.1, group=group_rule, tooltip="允许收盘价超过框顶多少ATR而不视为破坏？这对捕捉2B假突破至关重要。")
+
+group_view = "Smart View (智能视野)"
+bool  use_smart    = input.bool(true, "Enable Smart View (开启智能视野)", group=group_view)
+float view_range   = input.float(15.0, "Visible Range % (显示范围)", step=1.0, group=group_view)
+bool  auto_expand  = input.bool(true, "Auto Expand on 4H+ (4H以上自动展开)", group=group_view)
+
+group_ui = "UI Settings (界面微调)"
+bool  show_touches = input.bool(false, "Show Zone Touches (显示触碰计数)", group=group_ui)
+float text_offset  = input.float(6.0, "Text Height Offset (文字高度)", step=0.5, group=group_ui)
+color col_text     = input.color(color.gray, "Info Text Color", group=group_ui)
+
+group_sig = "Signals (信号过滤)"
+int   min_touches  = input.int(1, "Min Touches (最少触碰)", minval=1, group=group_sig)
+int   global_cd    = input.int(30, "Time Cooldown (时间冷却)", minval=1, group=group_sig)
+float price_filter = input.float(1.5, "Price Filter % (价格距离过滤)", step=0.1, group=group_sig)
+
+group_color = "Visuals (颜色)"
+color col_zone_bg = input.color(color.new(#f23645, 75), "Zone Background", group=group_color)
+color col_zone_bd = input.color(color.new(#f23645, 50), "Zone Border", group=group_color)
+color col_s_win   = input.color(#d32f2f, "S - Active (红色)", group=group_color)
+color col_2b_win  = input.color(#9c27b0, "2B - Active (紫色)", group=group_color) 
+// 修改：黑色背景下，止损的标签由黑色改为浅灰色，否则看不见
+color col_s_loss  = input.color(color.gray, "S - Stopped (灰色)", group=group_color)
+
+// ---------------------------------------------------------------------------------------------------------------------}
+// 🧠 核心数据结构
+// ---------------------------------------------------------------------------------------------------------------------{
+type Zone
+    float top
+    float bottom
+    int   touches
+    box   id
+    label lbl_count
+    bool  is_broken
+    int   fail_count 
+
+type Trade
+    int   entry_idx
+    float entry_high   
+    float entry_atr    
+    float sl_price
+    float tp_zero_cost 
+    label lbl_s        
+    label lbl_info     
+    bool  is_active    
+    bool  hit_zero     
+    bool  hit_sl       
+    int   zone_idx     
+
+var Zone[]  zones  = array.new<Zone>(0)
+var Trade[] trades = array.new<Trade>(0)
+
+var int   last_sig_idx   = 0 
+var float last_sig_price = 0.0 
+var bool  last_trade_hit_sl = false
+
+float atr = ta.atr(14)
+float ph  = ta.pivothigh(high, leftLen, rightLen)
+
+// ---------------------------------------------------------------------------------------------------------------------}
+// 1. 阻力区识别
+// ---------------------------------------------------------------------------------------------------------------------{
+if not na(ph)
+    float p_high = high[rightLen]
+    float p_body = math.max(open[rightLen], close[rightLen])
+    
+    // 稍微加厚一点框，避免太薄
+    if (p_high - p_body) < (atr * 0.2)
+        p_body := p_high - (atr * 0.2)
+        
+    bool merged = false
+    if array.size(zones) > 0
+        for i = 0 to array.size(zones) - 1
+            Zone z = array.get(zones, i)
+            if not z.is_broken
+                float tolerance = atr * merge_atr
+                if p_high <= (z.top + tolerance) and p_high >= (z.bottom - tolerance)
+                    z.top    := math.max(z.top, p_high)
+                    z.bottom := math.min(z.bottom, p_body) 
+                    z.touches += 1
+                    merged := true
+                    break
+    if not merged
+        box b = box.new(bar_index - rightLen, p_high, bar_index, p_body, border_color=col_zone_bd, bgcolor=col_zone_bg, xloc=xloc.bar_index)
+        label l = label.new(bar_index, p_high, "", color=col_zone_bd, textcolor=color.white, style=label.style_none)
+        array.push(zones, Zone.new(p_high, p_body, 1, b, l, false, 0))
+
+// ---------------------------------------------------------------------------------------------------------------------}
+// 2. 智能视野 & 信号检测
+// ---------------------------------------------------------------------------------------------------------------------{
+bool new_signal = false
+bool is_htf = timeframe.isdwm or (timeframe.multiplier >= 240)
+
+if array.size(zones) > 0
+    for i = array.size(zones) - 1 to 0
+        Zone z = array.get(zones, i)
+        
+        // --- 可见性控制 ---
+        float dist_pct = math.abs(close - z.top) / close * 100
+        bool is_visible = true
+        if use_smart
+            if auto_expand and is_htf
+                is_visible := true
+            else
+                is_visible := (dist_pct <= view_range)
+
+        if not z.is_broken
+            if not is_visible
+                // 不可见时，隐藏
+                box.set_bgcolor(z.id, color.new(color.white, 100))
+                box.set_border_color(z.id, color.new(color.white, 100))
+                label.set_style(z.lbl_count, label.style_none)
+                label.set_text(z.lbl_count, "")
+            else
+                box.set_right(z.id, bar_index + 10)
+                
+                // 🔥 修改：失效判定加入 Tolerance
+                if close > (z.top + atr * break_tol)
+                    z.is_broken := true
+                    // 🔥 修改：黑色背景适配
+                    // 失效的框变成白色虚影 (透明度 90%)
+                    box.set_bgcolor(z.id, color.new(color.white, 90))
+                    box.set_border_color(z.id, color.new(color.white, 85))
+                    label.delete(z.lbl_count)
+                else
+                    // 有效的框：红色
+                    box.set_bgcolor(z.id, col_zone_bg)
+                    box.set_border_color(z.id, col_zone_bd)
+                    if show_touches
+                        label.set_xy(z.lbl_count, bar_index + 10, z.top)
+                        label.set_text(z.lbl_count, str.tostring(z.touches))
+                        label.set_style(z.lbl_count, label.style_label_down)
+                        label.set_color(z.lbl_count, col_zone_bd)
+                    else
+                        label.set_style(z.lbl_count, label.style_none)
+                        label.set_text(z.lbl_count, "")
+
+        // --- C. 信号检测 ---
+        if not z.is_broken and z.touches >= min_touches and not new_signal and z.fail_count < max_retries
+            // 基础条件
+            bool touch = high >= z.bottom
+            bool is_bear = close < open
+            
+            // 冷却 & 价格过滤
+            bool time_ok = (bar_index - last_sig_idx) > global_cd
+            float diff = math.abs(close - last_sig_price) / last_sig_price * 100
+            bool price_ok = (last_sig_price == 0.0) or (diff > price_filter)
+            bool force_entry = last_trade_hit_sl
+            
+            bool entry_valid = (time_ok or force_entry) and (price_ok or force_entry) and barstate.isconfirmed
+            
+            if entry_valid
+                // 🔥 模式识别
+                // 模式 1: 标准触碰 (High 在区域内或下方触碰)
+                bool setup_std = touch and is_bear and high <= (z.top + atr * 0.1)
+                
+                // 模式 2: 2B 假突破 (High 刺破了 Top，但 Close 收回来了)
+                bool setup_2b = high > z.top and is_bear
+                
+                if (setup_std or setup_2b)
+                    last_sig_idx := bar_index
+                    last_sig_price := close
+                    new_signal := true
+                    last_trade_hit_sl := false 
+                    
+                    float trade_sl = z.top + (atr * sl_atr_mult)
+                    
+                    // 零成本计算
+                    float trade_risk = trade_sl - close
+                    float dist_to_zero = trade_risk * (0.7 / 0.3) 
+                    float trade_tp_zero = close - dist_to_zero 
+                    
+                    // 🏷️ 标签逻辑
+                    string txt_sig = setup_2b ? "2B" : "S"
+                    color col_sig = setup_2b ? col_2b_win : col_s_win
+                    
+                    label s_lbl = label.new(bar_index, high, txt_sig, color=col_sig, style=label.style_label_down, textcolor=color.white, size=size.small)
+                    label i_lbl = label.new(bar_index, high, "", color=color.new(color.white, 100), style=label.style_none, textcolor=col_text, size=size.normal)
+                    
+                    // 记录
+                    Trade t = Trade.new(bar_index, high, atr, trade_sl, trade_tp_zero, s_lbl, i_lbl, true, false, false, i)
+                    array.push(trades, t)
+                    alert("SR空单信号触发: " + txt_sig, alert.freq_once_per_bar_close)
+
+// ---------------------------------------------------------------------------------------------------------------------}
+// 3. 交易追踪 (保持原逻辑)
+// ---------------------------------------------------------------------------------------------------------------------{
+if array.size(trades) > 0
+    int last_idx = array.size(trades) - 1
+    
+    for k = 0 to last_idx
+        Trade t = array.get(trades, k)
+        
+        if t.is_active
+            // --- 止损判定 ---
+            bool sl_triggered = false
+            if use_close_sl
+                // 模式 A: 实体止损
+                if close > t.sl_price
+                    sl_triggered := true
+                if high > (t.sl_price + atr * 1.0) // 灾难风控
+                    sl_triggered := true
+            else
+                // 模式 B: 影线止损
+                if high >= t.sl_price
+                    sl_triggered := true
+            
+            if sl_triggered
+                t.is_active := false
+                t.hit_sl    := true
+                last_trade_hit_sl := true 
+                
+                if t.zone_idx < array.size(zones)
+                    Zone z_ref = array.get(zones, t.zone_idx)
+                    z_ref.fail_count += 1
+                
+                // 止损标签变色
+                label.set_color(t.lbl_s, col_s_loss) 
+                alert("SR空单已止损", alert.freq_once_per_bar)
+                
+            else if low <= t.tp_zero_cost and not t.hit_zero
+                t.hit_zero := true
+                // 💰 图标
+                label.new(bar_index, low, "💰", style=label.style_none, textcolor=color.yellow, size=size.tiny, yloc=yloc.belowbar)
+
+        // --- 浮动盈亏显示 ---
+        bool is_latest = (k == last_idx)
+        bool show_this = show_all_info or is_latest
+        
+        if show_this
+            string txt = "SL: " + str.tostring(t.sl_price, format.mintick) + "\n" + 
+                         "Risk: -" + str.tostring((t.sl_price - t.entry_high)/t.entry_high*100, "#.2") + "%"
+            
+            if is_latest and not t.hit_zero and not t.hit_sl
+                txt := txt + "\nTarget: " + str.tostring(t.tp_zero_cost, format.mintick)
+            label.set_text(t.lbl_info, txt)
+            float text_y_pos = t.entry_high + (t.entry_atr * text_offset)
+            label.set_xy(t.lbl_info, t.entry_idx, text_y_pos)
+            label.set_textcolor(t.lbl_info, t.hit_sl ? color.gray : col_text)
+        else
+            label.set_text(t.lbl_info, "")

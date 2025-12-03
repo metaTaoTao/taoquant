@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__pinescript-mcp-server__fix_pinescript_errors"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

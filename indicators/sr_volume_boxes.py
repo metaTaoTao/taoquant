@@ -77,7 +77,7 @@ class SupportResistanceVolumeBoxesIndicator:
         length = len(data)
 
         atr_series = _average_true_range(data["high"], data["low"], data["close"], period=self.atr_len)
-        atr_series = atr_series.fillna(method="bfill").fillna(method="ffill")
+        atr_series = atr_series.bfill().ffill()
         box_width = atr_series * self.box_width_mult
 
         pivot_high = self._pivot(source_array, self.lookback_period, mode="high")

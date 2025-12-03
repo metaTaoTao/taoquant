@@ -1,19 +1,12 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import List, Tuple
+from typing import Tuple
 
 import numpy as np
 import pandas as pd
 from backtesting import Strategy
 
 from indicators.sr_volume_boxes import SupportResistanceVolumeBoxesIndicator
-
-
-@dataclass
-class _GuardLevel:
-    price: float
-    activation_idx: int
 
 
 class SRGuardRailStrategy(Strategy):
@@ -41,44 +34,26 @@ class SRGuardRailStrategy(Strategy):
         self._result = result
         self._atr = result["atr"].to_numpy()
         self._support_prices, self._resistance_prices = self._build_guardrails(result)
+        result["confirmed_low"] = result["pivot_low"].shift(self.lookback_period)
+        result["confirmed_high"] = result["pivot_high"].shift(self.lookback_period)
+        result["support"] = result["confirmed_low"].ffill()
+        result["resistance"] = result["confirmed_high"].ffill()
         self._order_log = []  # collect guard rail info for trades
         self.data.df["support_guard"] = self._support_prices
         self.data.df["resistance_guard"] = self._resistance_prices
+        self.data.df["confirmed_low"] = result["confirmed_low"].to_numpy()
+        self.data.df["confirmed_high"] = result["confirmed_high"].to_numpy()
         self.data.df["atr_guard"] = self._atr
 
     def _build_guardrails(self, df: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray]:
-        n = len(df)
-        support_prices = np.full(n, np.nan)
-        resistance_prices = np.full(n, np.nan)
-        future_supports: List[_GuardLevel] = []
-        future_resistances: List[_GuardLevel] = []
-        active_supports: List[_GuardLevel] = []
-        active_resistances: List[_GuardLevel] = []
+        lookback = self.lookback_period
+        confirmed_low = df["pivot_low"].shift(lookback).ffill()
+        confirmed_high = df["pivot_high"].shift(lookback).ffill()
 
-        close_vals = df["close"].to_numpy()
-        pivot_low = df["pivot_low"].to_numpy()
-        pivot_high = df["pivot_high"].to_numpy()
+        support = confirmed_low.to_numpy()
+        resistance = confirmed_high.to_numpy()
 
-        for i in range(n):
-            if np.isfinite(pivot_low[i]):
-                future_supports.append(_GuardLevel(price=float(pivot_low[i]), activation_idx=i + self.lookback_period))
-            if np.isfinite(pivot_high[i]):
-                future_resistances.append(_GuardLevel(price=float(pivot_high[i]), activation_idx=i + self.lookback_period))
-
-            active_supports.extend([level for level in future_supports if level.activation_idx <= i])
-            future_supports = [level for level in future_supports if level.activation_idx > i]
-            active_resistances.extend([level for level in future_resistances if level.activation_idx <= i])
-            future_resistances = [level for level in future_resistances if level.activation_idx > i]
-
-            below = [level.price for level in active_supports if level.price <= close_vals[i]]
-            if below:
-                support_prices[i] = max(below)
-
-            above = [level.price for level in active_resistances if level.price >= close_vals[i]]
-            if above:
-                resistance_prices[i] = min(above)
-
-        return support_prices, resistance_prices
+        return support, resistance
 
     def next(self) -> None:
         i = len(self.data.Close) - 1
@@ -88,6 +63,10 @@ class SRGuardRailStrategy(Strategy):
         atr = float(self._atr[i]) if np.isfinite(self._atr[i]) else np.nan
         support = float(self._support_prices[i]) if np.isfinite(self._support_prices[i]) else np.nan
         resistance = float(self._resistance_prices[i]) if np.isfinite(self._resistance_prices[i]) else np.nan
+        if np.isfinite(support) and support > price:
+            support = np.nan
+        if np.isfinite(resistance) and resistance < price:
+            resistance = np.nan
         buffer_pct = self.entry_buffer_pct
 
         def within_buffer(level: float, reference: float) -> bool:

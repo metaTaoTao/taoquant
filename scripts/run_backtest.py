@@ -10,24 +10,31 @@ from backtest.engine import run_backtest
 from backtesting import Strategy  # type: ignore
 from core.config import default_config
 from data import DataManager
+from preprocess.build_sr_range import build_support_resistance
 from strategies import STRATEGY_REGISTRY
+from strategies.structure_weighted_grid import StructureWeightedGrid
 
 REQUIRED_KEYS = ("symbol", "timeframe", "strategy")
 
 run_config: Dict[str, Any] = {
     "symbol": "BTCUSDT",
     "timeframe": "15m",
-    "strategy": "sr_guard",
+    "strategy": "sr_grid",
     "source": "okx",
     "start": None,
     "end": None,
     "lookback_days": 30,
     "output": "backtest/results",
     "strategy_params": {
-        "lookback_period": 20,
-        "box_width_mult": 1.0,
-        "entry_buffer_pct": 0.001,
-        "stop_atr_multiple": 3.0,
+        "grid_gap_pct": 0.0018,
+        "alpha": 2.0,
+        "max_levels_side": 10,
+        "atr_mult_stop": 1.0,
+        "exposure_thresh": 0.7,
+        "mid_band_pct": 0.001,
+        "decay_k": 2.0,
+        "micro_atr_ratio": 0.6,
+        "breakout_ratio": 1.0,
         "trade_size": 1.0,
     },
 }
@@ -79,6 +86,10 @@ def _execute(config: Dict[str, Any]) -> None:
 
     strategy_cls = _resolve_strategy(config["strategy"])
     output_dir = Path(config["output"])
+
+    if strategy_cls is StructureWeightedGrid:
+        data = build_support_resistance(data)
+
     run_backtest(
         data,
         strategy_cls,

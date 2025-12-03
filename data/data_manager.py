@@ -44,11 +44,35 @@ class DataManager:
         cache_path = self._cache_path(source, symbol, timeframe)
         if use_cache and cache_path.exists():
             cached_df = self._load_cache(cache_path)
-            if start or end:
-                cached_df = self._trim_timeframe(cached_df, start, end)
             if not cached_df.empty:
-                return cached_df
+                # Check if cache covers the requested time range
+                cache_start = cached_df.index[0]
+                cache_end = cached_df.index[-1]
+                request_start = DataManager._to_utc(start) if start else None
+                request_end = DataManager._to_utc(end) if end else None
+                
+                # Cache covers the request if:
+                # - No start requested OR cache starts before/at requested start
+                # - No end requested OR cache ends after/at requested end
+                cache_covers = (
+                    (request_start is None or cache_start <= request_start) and
+                    (request_end is None or cache_end >= request_end)
+                )
+                
+                if cache_covers:
+                    # Cache fully covers the request, trim and return
+                    if request_start or request_end:
+                        cached_df = self._trim_timeframe(cached_df, start, end)
+                    if not cached_df.empty:
+                        print(f"[Cache] Using cached data: {len(cached_df)} bars from {cache_start} to {cache_end}")
+                        return cached_df
+                else:
+                    print(f"[Cache] Cache exists but doesn't cover request range:")
+                    print(f"  Cache: {cache_start} to {cache_end} ({len(cached_df)} bars)")
+                    print(f"  Request: {request_start} to {request_end}")
+                    print(f"  Fetching fresh data...")
 
+        # Cache doesn't exist, expired, or doesn't cover the request - fetch fresh data
         if source in self.EXTERNAL_SOURCE_MAP:
             handler = self._load_external_source(source)
             data = handler.get_klines(symbol, timeframe, start=start, end=end)
@@ -314,7 +338,13 @@ class DataManager:
             cls = getattr(module, class_name)
         except ImportError as exc:  # pragma: no cover
             raise ImportError(f"Failed to import data source '{name}'. Ensure required package is installed.") from exc
-        instance = cls()
+        
+        # Pass debug=False to OkxSDKDataSource to suppress debug output
+        if class_name == "OkxSDKDataSource":
+            instance = cls(debug=False)
+        else:
+            instance = cls()
+        
         if not isinstance(instance, MarketDataSource):
             raise TypeError(f"Data source '{name}' must inherit from MarketDataSource.")
         self._external_sources[name] = instance
