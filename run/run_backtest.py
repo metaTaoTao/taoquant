@@ -7,14 +7,19 @@ Simply modify the configuration section to change symbol, timeframe, date range,
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from typing import Optional, Type
+
+# Add project root to path
+project_root = Path(__file__).parent.parent
+sys.path.insert(0, str(project_root))
 
 import numpy as np
 import pandas as pd
 from backtesting import Backtest, Strategy
 
-from data.data_manager import DataManager
+from data import DataManager
 
 
 def run_strategy_backtest(
@@ -260,7 +265,14 @@ def run_strategy_backtest(
             active_zones_path = output_dir / f"{strategy_class.__name__}_{symbol}_{timeframe}_active_zones.csv"
             active_zones_df.to_csv(active_zones_path, index=False)
             print(f"Active zones log saved to: {active_zones_path}")
-    
+
+    # Export virtual trades results if using virtual equity system
+    if strategy_instance and hasattr(strategy_instance, "use_virtual_equity") and strategy_instance.use_virtual_equity:
+        print(f"\n" + "=" * 80)
+        print("EXPORTING VIRTUAL TRADES RESULTS")
+        print("=" * 80)
+        strategy_instance.export_results(output_dir=str(output_dir))
+
     # Generate plot
     if plot:
         plot_path = output_dir / f"{strategy_class.__name__}_{symbol}_{timeframe}_plot.html"
@@ -638,7 +650,7 @@ if __name__ == "__main__":
     SOURCE = "okx"  # 'okx' or 'binance'
     
     # Backtest settings
-    INITIAL_CAPITAL = 1000000  # Increased for BTC (1 BTC ~ $60k+)
+    INITIAL_CAPITAL = 50000000  # $50M - CRITICAL: Ensures all position sizes < 10% to avoid backtesting.py unit conversion bug
     COMMISSION = 0.001  # 0.1%
     TRADE_ON_CLOSE = True
     EXCLUSIVE_ORDERS = False  # Set to False to allow multiple positions
@@ -656,7 +668,7 @@ if __name__ == "__main__":
         "price_filter_pct": 1.5,
         "min_position_distance_pct": 1.5,
         "max_positions": 5,
-        "risk_per_trade_pct": 0.5,
+        "risk_per_trade_pct": 0.5,  # 0.5% risk per trade (standard risk management)
         "leverage": 5.0,
         "strategy_sl_percent": 2.0,
         "breakeven_ratio": 2.33,

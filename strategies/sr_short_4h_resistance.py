@@ -39,7 +39,7 @@ class Zone:
 @dataclass
 class VirtualTrade:
     """Virtual trade tracking object."""
-    
+
     trade_id: str
     entry_time: pd.Timestamp
     entry_price: float
@@ -50,17 +50,34 @@ class VirtualTrade:
     tp_price: Optional[float]  # Fixed TP target (for first 30%)
     zone_idx: int
     position_qty: float
-    
+
     # Strategy flags
     enable_trailing: bool = False
     trailing_active: bool = False
-    
+
     is_active: bool = True
     exit_time: Optional[pd.Timestamp] = None
     exit_price: Optional[float] = None
     exit_reason: str = ""
     realized_pnl: float = 0.0
     lowest_price: float = field(default=float('inf'))  # Track lowest price since entry for trailing stop
+
+    def get_unrealized_pnl(self, current_price: float) -> float:
+        """
+        Calculate unrealized P&L for active trade.
+        For SHORT positions: P&L = (entry_price - current_price) * qty
+        """
+        if not self.is_active:
+            return 0.0
+        return (self.entry_price - current_price) * self.position_qty
+
+    def close_trade(self, exit_price: float, exit_time: pd.Timestamp, exit_reason: str):
+        """Close trade and calculate realized P&L."""
+        self.is_active = False
+        self.exit_price = exit_price
+        self.exit_time = exit_time
+        self.exit_reason = exit_reason
+        self.realized_pnl = (self.entry_price - exit_price) * self.position_qty
 
 
 def calculate_atr(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> pd.Series:
@@ -246,6 +263,11 @@ class SRShort4HResistance(Strategy):
         self.last_sig_price: float = 0.0
         self.active_zones_log: list[dict] = []  # Log of active zones per bar
         self.zone_history: list[dict] = []  # History of zones for plotting
+
+        # Equity tracking (bypassing backtesting.py's order system)
+        self.initial_cash = self._broker._cash  # Get initial capital from backtesting.py
+        self.equity_curve: list[dict] = []  # Track equity over time
+        self.use_virtual_equity = True  # Flag to use virtual trade system instead of backtesting.py orders
         
         # Map current bar time to 4H bar index
         self._build_timeframe_map()
@@ -730,90 +752,133 @@ class SRShort4HResistance(Strategy):
 
             # 2. Check Stop Loss (Fixed or Trailed)
             if current_high >= trade.sl_price:
-                trade.is_active = False
-                trade.exit_time = self.data.df.index[current_idx]
-                trade.exit_price = trade.sl_price
-                trade.exit_reason = "SL/Trail"
+                trade.close_trade(trade.sl_price, self.data.df.index[current_idx], "SL/Trail")
                 continue
-            
+
             # 3. Check Fixed TP (Trade 1 only)
             if trade.tp_price is not None:
                 if current_low <= trade.tp_price:
-                    trade.is_active = False
-                    trade.exit_time = self.data.df.index[current_idx]
-                    trade.exit_price = trade.tp_price
-                    trade.exit_reason = "TP"
+                    trade.close_trade(trade.tp_price, self.data.df.index[current_idx], "TP")
                     continue
 
             # Accumulate remaining
             if trade.is_active:
                 total_position_size += trade.position_qty
-        
-        # Update actual position
-        self._sync_position(total_position_size)
+
+        # DON'T sync with backtesting.py - we're using virtual equity tracking
+        # self._sync_position(total_position_size)  # REMOVED
 
     def _sync_position(self, target_size: float):
         """
         Sync actual position with target size (in BTC units).
-        
+
         Converts BTC quantity to percentage of equity for backtesting.py compatibility.
         backtesting.py requires size to be either:
-        - A fraction of equity (0 < size < 1), OR  
+        - A fraction of equity (0 < size < 1), OR
         - A whole number of units (size >= 1 and integer)
-        
+
         We use percentage mode to support fractional BTC positions.
+
+        SAFETY FEATURES:
+        - Caps maximum position at 95% to prevent size >= 1.0 issues
+        - Enforces minimum position threshold to avoid ignored orders
+        - Handles equity fluctuations gracefully
         """
+        # Constants for safety checks
+        MAX_POSITION_PCT = 0.95  # Never exceed 95% of equity
+        MIN_POSITION_PCT = 0.001  # Minimum 0.1% position
+
         if target_size <= 0:
             # Close position if target is zero
             if self.position and self.position.size != 0:
                 self.position.close()
             return
-        
+
         # Get current price and equity for conversion
         current_idx = len(self.data) - 1
         current_price = self.data.Close[current_idx]
         equity = self.equity
-        
+
         # Convert BTC quantity to percentage of equity
         # Formula: size_pct = (qty * price) / equity
         target_size_pct = (target_size * current_price) / equity
-        
-        # Ensure it's within valid range (0 < size < 1)
-        if target_size_pct >= 1.0:
-            target_size_pct = 0.99  # Cap at 99% of equity
-        if target_size_pct <= 0:
+
+        # 🔥 SAFETY CHECK 1: Cap at maximum percentage (STRICT: 0.5 to avoid backtesting.py bugs)
+        STRICT_MAX_PCT = 0.5  # backtesting.py has issues with larger percentages
+        if target_size_pct >= STRICT_MAX_PCT:
+            print(f"[WARNING] Position size {target_size_pct:.2%} exceeds STRICT maximum {STRICT_MAX_PCT:.0%}. "
+                  f"Capping at {STRICT_MAX_PCT:.0%} to avoid backtesting.py unit conversion bug. "
+                  f"(Target: {target_size:.4f} BTC, Price: ${current_price:.2f}, Equity: ${equity:.2f})")
+            target_size_pct = STRICT_MAX_PCT
+        elif target_size_pct >= MAX_POSITION_PCT:
+            print(f"[WARNING] Position size {target_size_pct:.2%} exceeds maximum {MAX_POSITION_PCT:.0%}. "
+                  f"Capping at {MAX_POSITION_PCT:.0%}. "
+                  f"(Target: {target_size:.4f} BTC, Price: ${current_price:.2f}, Equity: ${equity:.2f})")
+            target_size_pct = MAX_POSITION_PCT
+
+        # 🔥 SAFETY CHECK 2: Enforce minimum threshold
+        if target_size_pct < MIN_POSITION_PCT:
+            print(f"[WARNING] Position size {target_size_pct:.4%} below minimum {MIN_POSITION_PCT:.1%}. Skipping order.")
             return
-        
+
+        # 🔥 SAFETY CHECK 3: Validate percentage range
+        if target_size_pct <= 0 or target_size_pct >= 1.0:
+            print(f"[ERROR] Invalid target_size_pct: {target_size_pct}. Must be in (0, 1). Aborting.")
+            return
+
         # Get current position size
         if not self.position or self.position.size == 0:
             # No position, open new one
+            print(f"[DEBUG] Opening NEW position: target_size={target_size:.4f} BTC, "
+                  f"target_size_pct={target_size_pct:.4f} ({target_size_pct:.2%}), "
+                  f"price=${current_price:.2f}, equity=${equity:.2f}")
             self.sell(size=target_size_pct)
         else:
             # We have a position, need to adjust
             current_size = abs(self.position.size)
-            
-            # Convert current_size to percentage if needed
+
+            print(f"[DEBUG] Adjusting position: current_size={current_size} (from backtesting.py), "
+                  f"target_size={target_size:.4f} BTC, target_size_pct={target_size_pct:.4f} ({target_size_pct:.2%})")
+
+            # 🔥 SAFETY CHECK 4: Handle unit/percentage confusion
             # backtesting.py returns size as percentage if < 1, or units if >= 1
             if current_size >= 1.0:
-                # It's in units, convert to percentage
+                # It's in units (shouldn't happen with our safety checks, but handle it)
+                print(f"[WARNING] Position size {current_size} is in units (>= 1.0). "
+                      f"Converting to percentage. This may indicate a previous error.")
                 current_size_pct = (current_size * current_price) / equity
-                if current_size_pct >= 1.0:
-                    current_size_pct = 0.99
+                # Re-apply cap
+                if current_size_pct >= MAX_POSITION_PCT:
+                    current_size_pct = MAX_POSITION_PCT
+                print(f"[DEBUG] Converted: current_size_pct={current_size_pct:.4f} ({current_size_pct:.2%})")
             else:
                 # Already in percentage
                 current_size_pct = current_size
-            
+                print(f"[DEBUG] Already in percentage: current_size_pct={current_size_pct:.4f} ({current_size_pct:.2%})")
+
             diff_pct = target_size_pct - current_size_pct
-            
+            print(f"[DEBUG] diff_pct={diff_pct:.4f} ({diff_pct:.2%})")
+
             # Adjust position if difference is significant
-            if abs(diff_pct) > 0.0001:  # Tolerance for percentage
+            TOLERANCE_PCT = 0.0001  # 0.01% tolerance
+            if abs(diff_pct) > TOLERANCE_PCT:
                 if diff_pct > 0:
                     # Need to increase short position
-                    self.sell(size=diff_pct)
+                    # 🔥 SAFETY CHECK 5: Ensure increase doesn't exceed max
+                    add_size = min(diff_pct, MAX_POSITION_PCT - current_size_pct)
+                    if add_size > MIN_POSITION_PCT:
+                        print(f"[DEBUG] Selling add_size={add_size:.4f} ({add_size:.2%})")
+                        self.sell(size=add_size)
+                    else:
+                        print(f"[INFO] Position increase {add_size:.4%} too small, skipping.")
                 else:
-                    # Need to reduce short position (buy back = close short)
-                    # For short positions, buying reduces the position
-                    self.buy(size=abs(diff_pct))
+                    # Need to reduce short position (buy back)
+                    reduce_size = min(abs(diff_pct), current_size_pct)
+                    if reduce_size > MIN_POSITION_PCT:
+                        print(f"[DEBUG] Buying reduce_size={reduce_size:.4f} ({reduce_size:.2%})")
+                        self.buy(size=reduce_size)
+                    else:
+                        print(f"[INFO] Position decrease {reduce_size:.4%} too small, skipping.")
     
     def next(self):
         """Execute strategy logic on each bar."""
@@ -892,7 +957,30 @@ class SRShort4HResistance(Strategy):
         
         # Check exits first
         self._check_exits(current_idx)
-        
+
+        # Calculate and track equity (using virtual trades system)
+        if self.use_virtual_equity:
+            current_price = self.data.Close[current_idx]
+            current_time = self.data.df.index[current_idx]
+
+            # Calculate unrealized P&L from all active trades
+            unrealized_pnl = sum(t.get_unrealized_pnl(current_price) for t in self.virtual_trades if t.is_active)
+
+            # Calculate realized P&L from all closed trades
+            realized_pnl = sum(t.realized_pnl for t in self.virtual_trades if not t.is_active)
+
+            # Total equity = initial cash + realized P&L + unrealized P&L
+            total_equity = self.initial_cash + realized_pnl + unrealized_pnl
+
+            # Track equity
+            self.equity_curve.append({
+                'timestamp': current_time,
+                'equity': total_equity,
+                'realized_pnl': realized_pnl,
+                'unrealized_pnl': unrealized_pnl,
+                'active_trades': sum(1 for t in self.virtual_trades if t.is_active)
+            })
+
         # Check for new entry signal
         # Note: We allow multiple virtual trades even if we have a position
         # The position will be managed by _check_exits to match total virtual trade sizes
@@ -919,9 +1007,78 @@ class SRShort4HResistance(Strategy):
         self.virtual_trades.extend(new_trades)
         self.last_sig_idx = current_idx
         self.last_sig_price = entry_price
-        
-        # Update position immediately
-        # Calculate total position size from all active trades
-        total_size = sum(t.position_qty for t in self.virtual_trades if t.is_active)
-        self._sync_position(total_size)
+
+        # DON'T sync with backtesting.py - we're using virtual equity tracking
+        # total_size = sum(t.position_qty for t in self.virtual_trades if t.is_active)
+        # self._sync_position(total_size)  # REMOVED
+
+    def export_results(self, output_dir: str = "run/scripts/backtest/results"):
+        """Export backtest results from virtual trades system."""
+        import os
+        os.makedirs(output_dir, exist_ok=True)
+
+        # Export trades
+        trades_data = []
+        for t in self.virtual_trades:
+            if not t.is_active:  # Only export closed trades
+                trades_data.append({
+                    'Trade_ID': t.trade_id,
+                    'Size': -t.position_qty,  # Negative for SHORT
+                    'EntryTime': t.entry_time,
+                    'EntryPrice': t.entry_price,
+                    'ExitTime': t.exit_time,
+                    'ExitPrice': t.exit_price,
+                    'PnL': t.realized_pnl,
+                    'ReturnPct': (t.realized_pnl / (t.position_qty * t.entry_price)) if t.position_qty > 0 else 0,
+                    'Duration': t.exit_time - t.entry_time if t.exit_time else None,
+                    'ExitReason': t.exit_reason,
+                    'SL_Price': t.sl_price,
+                    'TP_Price': t.tp_price,
+                    'TrailingEnabled': t.enable_trailing,
+                    'TrailingActivated': t.trailing_active
+                })
+
+        trades_df = pd.DataFrame(trades_data)
+        trades_path = os.path.join(output_dir, 'virtual_trades.csv')
+        trades_df.to_csv(trades_path, index=False)
+        print(f"[EXPORT] Exported {len(trades_df)} trades to {trades_path}")
+
+        # Export equity curve
+        equity_df = pd.DataFrame(self.equity_curve)
+        equity_path = os.path.join(output_dir, 'virtual_equity_curve.csv')
+        equity_df.to_csv(equity_path, index=False)
+        print(f"[EXPORT] Exported equity curve to {equity_path}")
+
+        # Calculate and print statistics
+        if len(trades_df) > 0:
+            winning_trades = trades_df[trades_df['PnL'] > 0]
+            losing_trades = trades_df[trades_df['PnL'] < 0]
+
+            total_pnl = trades_df['PnL'].sum()
+            win_rate = len(winning_trades) / len(trades_df) * 100 if len(trades_df) > 0 else 0
+            avg_win = winning_trades['PnL'].mean() if len(winning_trades) > 0 else 0
+            avg_loss = losing_trades['PnL'].mean() if len(losing_trades) > 0 else 0
+
+            final_equity = self.equity_curve[-1]['equity'] if self.equity_curve else self.initial_cash
+            total_return = (final_equity - self.initial_cash) / self.initial_cash * 100
+
+            print("\n" + "="*80)
+            print("VIRTUAL TRADES BACKTEST RESULTS")
+            print("="*80)
+            print(f"Initial Capital: ${self.initial_cash:,.2f}")
+            print(f"Final Equity: ${final_equity:,.2f}")
+            print(f"Total Return: {total_return:+.2f}%")
+            print(f"Total P&L: ${total_pnl:+,.2f}")
+            print(f"-" * 80)
+            print(f"Total Trades: {len(trades_df)}")
+            print(f"Winning Trades: {len(winning_trades)} ({len(winning_trades)/len(trades_df)*100:.1f}%)")
+            print(f"Losing Trades: {len(losing_trades)} ({len(losing_trades)/len(trades_df)*100:.1f}%)")
+            print(f"Win Rate: {win_rate:.2f}%")
+            print(f"Average Win: ${avg_win:+,.2f}")
+            print(f"Average Loss: ${avg_loss:+,.2f}")
+            if avg_loss != 0:
+                print(f"Profit Factor: {abs(avg_win / avg_loss):.2f}")
+            print("="*80)
+
+        return trades_df, equity_df
 
