@@ -1,26 +1,18 @@
 """
 Strategies package initialization.
+
+New architecture: All strategies extend BaseStrategy and implement
+three pure functions: compute_indicators, generate_signals, calculate_position_size
 """
 
 from __future__ import annotations
 
-from .sma_cross import SmaCrossStrategy
-from .tdxh_dip import TDXHDipStrategy
-from .sr_guard import SRGuardRailStrategy
-from .structure_weighted_grid import StructureWeightedGrid
-
-STRATEGY_REGISTRY = {
-    "sma_cross": SmaCrossStrategy,
-    "tdxh": TDXHDipStrategy,
-    "sr_guard": SRGuardRailStrategy,
-    "sr_grid": StructureWeightedGrid,
-}
+from .base_strategy import BaseStrategy, StrategyConfig
+from .signal_based.sr_short import SRShortStrategy, SRShortConfig
 
 __all__ = [
-    "SmaCrossStrategy",
-    "TDXHDipStrategy",
-    "SRGuardRailStrategy",
-    "StructureWeightedGrid",
-    "STRATEGY_REGISTRY",
+    "BaseStrategy",
+    "StrategyConfig",
+    "SRShortStrategy",
+    "SRShortConfig",
 ]
-

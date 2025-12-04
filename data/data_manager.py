@@ -8,7 +8,7 @@ from typing import Any, Dict, Iterable, Optional, Tuple
 import pandas as pd
 import requests
 
-from core.config import default_config
+from data.config import default_config
 from data.schemas import COLUMNS_OHLCV
 from data.sources import MarketDataSource
 from utils.csv_loader import load_csv_ohlcv
@@ -54,9 +54,12 @@ class DataManager:
                 # Cache covers the request if:
                 # - No start requested OR cache starts before/at requested start
                 # - No end requested OR cache ends after/at requested end
+                # Note: For end time, we allow cache_end to be slightly before request_end
+                # if the difference is less than one bar (to handle timezone/rounding issues)
+                time_delta = pd.Timedelta(minutes=timeframe_to_minutes(timeframe))
                 cache_covers = (
                     (request_start is None or cache_start <= request_start) and
-                    (request_end is None or cache_end >= request_end)
+                    (request_end is None or cache_end >= (request_end - time_delta))
                 )
                 
                 if cache_covers:
