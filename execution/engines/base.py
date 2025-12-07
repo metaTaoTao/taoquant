@@ -172,6 +172,7 @@ class BacktestResult:
             "-" * 60,
             "Performance Metrics:",
             f"  Total Return:    {self.metrics.get('total_return', 0):.2%}",
+            f"  Total PnL:       ${self.metrics.get('total_pnl', 0):,.2f}",
             f"  Sharpe Ratio:    {self.metrics.get('sharpe_ratio', 0):.2f}",
             f"  Sortino Ratio:   {self.metrics.get('sortino_ratio', 0):.2f}",
             f"  Max Drawdown:    {self.metrics.get('max_drawdown', 0):.2%}",

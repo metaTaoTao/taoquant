@@ -235,15 +235,8 @@ def compute_sr_zones(
         if np.isnan(current_atr):
             current_atr = 0.01
 
-        # 1. Check breaks for active zones
-        for zone in zones:
-            if not zone.is_broken:
-                break_threshold = zone.top + (current_atr * 0.5)
-                if current_close > break_threshold:
-                    zone.is_broken = True
-                    zone.end_time = data.index[i]
-
-        # 2. Check for new pivot confirmation
+        # 1. Check for new pivot confirmation FIRST (before checking breaks)
+        # This ensures new zones are created before we check breaks
         if i in pivot_events:
             pivot_real_idx, p_high, p_body = pivot_events[i]
 
@@ -273,12 +266,21 @@ def compute_sr_zones(
                 new_zone = Zone(
                     top=p_high,
                     bottom=p_body,
-                    start_time=data.index[pivot_real_idx],
-                    end_time=data.index[i],
+                    start_time=data.index[i],  # Fixed: Use confirmation time (not pivot time) to avoid future function
+                    end_time=None,  # Fixed: Zone is active until broken (not set to confirmation time)
                     touches=1,
                     is_broken=False
                 )
                 zones.append(new_zone)
+
+        # 2. Check breaks for active zones AFTER processing pivots
+        # This ensures zones can be used in the current bar before being marked as broken
+        for zone in zones:
+            if not zone.is_broken:
+                break_threshold = zone.top + (current_atr * 0.5)
+                if current_close > break_threshold:
+                    zone.is_broken = True
+                    zone.end_time = data.index[i]
 
     # Convert zones to DataFrame columns
     # For each bar, find the nearest active zone
@@ -292,7 +294,8 @@ def compute_sr_zones(
         current_time = data.index[i]
         active_zones_at_time = [
             z for z in zones
-            if z.start_time <= current_time and (z.end_time is None or z.end_time >= current_time)
+            if z.start_time <= current_time and (z.end_time is None or z.end_time > current_time)
+            # Note: Use > instead of >= to ensure zone is active UNTIL (not including) break time
         ]
 
         if active_zones_at_time:
@@ -301,7 +304,11 @@ def compute_sr_zones(
             zone_tops.append(zone.top)
             zone_bottoms.append(zone.bottom)
             zone_touches_list.append(zone.touches)
-            zone_is_broken_list.append(zone.is_broken)
+            # Zone is considered broken if end_time is set (not None)
+            # But at current bar, if end_time == current_time, zone is still usable
+            # (break happens at close, so we can still enter at open/during the bar)
+            is_broken_at_current_bar = zone.end_time is not None and zone.end_time < current_time
+            zone_is_broken_list.append(is_broken_at_current_bar)
         else:
             zone_tops.append(np.nan)
             zone_bottoms.append(np.nan)

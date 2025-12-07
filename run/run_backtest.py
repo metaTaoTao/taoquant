@@ -49,17 +49,56 @@ SOURCE = "okx"  # 'okx', 'binance', or 'csv'
 STRATEGY_CONFIG = SRShortConfig(
     name="SR Short 4H",
     description="Short-only strategy based on 4H resistance zones",
-    # Zone detection (optimized for more signals)
-    left_len=30,  # Reduced from 90: 30*4h = 120h = 5 days lookback (more sensitive)
-    right_len=5,  # Reduced from 10: 5*4h = 20h confirmation (faster confirmation)
+
+    # ============================================================
+    # Zone Detection Parameters
+    # ============================================================
+    left_len=30,  # 30*4h = 120h = 5 days lookback (more sensitive)
+    right_len=5,  # 5*4h = 20h confirmation (faster confirmation)
     merge_atr_mult=3.5,
+
     # Entry filters
     min_touches=1,
     max_retries=3,
-    # Risk management
+
+    # ============================================================
+    # Normal Trade Risk Management
+    # ============================================================
     risk_per_trade_pct=0.5,  # 0.5% risk per trade
     leverage=5.0,
-    stop_loss_atr_mult=3.0,
+    stop_loss_atr_mult=3.0,  # 3 ATR stop (3-sigma principle)
+
+    # ============================================================
+    # Zero-Cost Position Strategy (Normal Trades)
+    # ============================================================
+    # 激进型配置：3.33R + 30% = 零成本，剩余70%继续持有
+    use_zero_cost_strategy=True,  # 使用零成本持仓策略
+    zero_cost_trigger_rr=3.33,  # 达到3.33R时触发（公式：1/0.3=3.33）
+    zero_cost_exit_pct=0.30,  # 平掉30%锁定1R利润
+    zero_cost_lock_risk=True,  # 锁定初始风险，剩余70%trailing stop
+
+    # Trailing stop parameters
+    trailing_stop_atr_mult=5.0,  # Trailing stop距离
+    trailing_offset_atr_mult=2.0,  # Trailing stop偏移
+
+    # ============================================================
+    # 2B Reversal Strategy Parameters
+    # ============================================================
+    enable_2b_reversal=True,  # 🔴 改为True启用2B反转策略
+
+    # 2B触发条件
+    b2_time_window_hours=48.0,  # 止损后48小时内有效
+    b2_breakout_threshold_pct=0.0,  # 收盘价跌破zone_bottom即触发
+
+    # 2B风险管理
+    b2_risk_per_trade_pct=2.0,  # 2B单风险2%（更激进）
+    b2_stop_loss_atr_mult=3.0,  # 2B单止损3 ATR（3-sigma原则）
+
+    # 2B零成本策略
+    b2_use_zero_cost_strategy=True,  # 2B单也使用零成本策略
+    b2_zero_cost_trigger_rr=2.0,  # 2B单达到2R时触发
+    b2_trailing_stop_atr_mult=5.0,  # 2B单trailing stop
+    b2_trailing_offset_atr_mult=2.0,  # 2B单trailing offset
 )
 
 # Backtest parameters
@@ -110,6 +149,7 @@ if __name__ == "__main__":
     print("\n[Success] Backtest completed successfully!")
     print(f"[Results] Results saved to: {OUTPUT_DIR}")
     print(f"[Metrics] Total Return: {result.metrics['total_return']:.2%}")
+    print(f"[Metrics] Total PnL: ${result.metrics['total_pnl']:,.2f}")
     print(f"[Metrics] Max Drawdown: {result.metrics['max_drawdown']:.2%}")
     print(f"[Metrics] Sharpe Ratio: {result.metrics['sharpe_ratio']:.2f}")
     print(f"[Metrics] Win Rate: {result.metrics['win_rate']:.2%}")

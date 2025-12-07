@@ -71,17 +71,57 @@ class SRShortConfig(StrategyConfig):
     stop_loss_atr_mult : float
         Stop loss distance in ATR multiples (default: 3.0)
     
-    Take Profit & Trailing Stop
-    ---------------------------
+    Take Profit & Trailing Stop (Zero-Cost Position Strategy)
+    ----------------------------------------------------------
+    use_zero_cost_strategy : bool
+        Use zero-cost position strategy (default: True)
+        When True: Lock in initial risk at TP1, let rest run with trailing stop
+        When False: Use fixed R:R ratio and exit percentage
+
     tp1_rr_ratio : float
-        Risk-reward ratio for TP1 (default: 2.33)
-        When profit reaches this ratio, close 30% of position
+        Risk-reward ratio for TP1 (default: 2.33) [if use_zero_cost_strategy=False]
     tp1_exit_pct : float
-        Percentage of position to close at TP1 (default: 0.3 = 30%)
+        Percentage to close at TP1 (default: 0.3 = 30%) [if use_zero_cost_strategy=False]
+
+    zero_cost_trigger_rr : float
+        Profit level to trigger zero-cost (default: 2.0 = 2R)
+    zero_cost_lock_risk : bool
+        True: Lock 1R profit at TP1, False: Move SL to breakeven (default: True)
+
     trailing_stop_atr_mult : float
         Trailing stop distance in ATR multiples (default: 5.0)
     trailing_offset_atr_mult : float
         Trailing stop offset in ATR multiples (default: 2.0)
+
+    2B Reversal Strategy Parameters
+    --------------------------------
+    enable_2b_reversal : bool
+        Enable 2B reversal strategy (default: False)
+        2B: Resistance broken → stopped out → price falls back below resistance
+        This confirms false breakout, creating strong short opportunity
+
+    b2_time_window_hours : float
+        Time window after stop loss (hours) (default: 48.0)
+    b2_breakout_threshold_pct : float
+        Minimum % below zone_bottom to trigger (default: 0.0)
+        0.0 = trigger on close below zone_bottom
+        0.3 = require 0.3% below zone_bottom
+
+    b2_risk_per_trade_pct : float
+        Risk % for 2B trades (default: 2.0 = 2%)
+        Higher risk justified by higher win rate
+    b2_stop_loss_atr_mult : float
+        Stop loss for 2B trades in ATR (default: 3.0)
+        Following 3-sigma principle
+
+    b2_use_zero_cost_strategy : bool
+        Use zero-cost strategy for 2B trades (default: True)
+    b2_zero_cost_trigger_rr : float
+        Zero-cost trigger for 2B trades (default: 2.0)
+    b2_trailing_stop_atr_mult : float
+        Trailing stop for 2B trades (default: 5.0)
+    b2_trailing_offset_atr_mult : float
+        Trailing offset for 2B trades (default: 2.0)
     """
 
     # Zone detection - HTF parameters
@@ -104,11 +144,41 @@ class SRShortConfig(StrategyConfig):
     leverage: float = 5.0
     stop_loss_atr_mult: float = 3.0
     
-    # Take profit & trailing stop
-    tp1_rr_ratio: float = 2.33  # TP1 at 2.33x risk-reward
-    tp1_exit_pct: float = 0.3  # Close 30% at TP1
+    # Take profit & trailing stop (Zero-Cost Position Strategy)
+    # 零成本持仓策略：TP1锁定初始风险，剩余仓位用trailing stop保护
+    use_zero_cost_strategy: bool = True  # 使用零成本持仓策略
+    tp1_rr_ratio: float = 2.33  # TP1触发条件：盈利达到N倍风险（如果use_zero_cost_strategy=False）
+    tp1_exit_pct: float = 0.3  # TP1平仓比例（如果use_zero_cost_strategy=False）
+
+    # Zero-cost strategy parameters (when use_zero_cost_strategy=True)
+    # 激进型配置：3.33R + 30% = 剩余70%继续持有
+    zero_cost_trigger_rr: float = 3.33  # 达到3.33R时触发零成本策略
+    zero_cost_exit_pct: float = 0.30  # 平掉30%锁定1R利润
+    zero_cost_lock_risk: bool = True  # True: 锁定1R利润, False: 移动止损到入场价
+
     trailing_stop_atr_mult: float = 5.0  # Trailing stop distance
     trailing_offset_atr_mult: float = 2.0  # Trailing stop offset
+
+    # ========================================
+    # 2B Reversal Strategy Parameters
+    # ========================================
+    # 2B反转：阻力被突破后再次跌破，做空机会（假突破确认）
+
+    enable_2b_reversal: bool = False  # 启用2B反转策略
+
+    # 2B触发条件
+    b2_time_window_hours: float = 48.0  # 止损后多久内有效（小时）
+    b2_breakout_threshold_pct: float = 0.0  # 跌破zone_bottom的最小幅度（0=收盘价跌破即可）
+
+    # 2B风险管理
+    b2_risk_per_trade_pct: float = 2.0  # 2B单风险（%）- 更高风险因为胜率更高
+    b2_stop_loss_atr_mult: float = 3.0  # 2B单止损倍数（ATR）- 3 sigma原则
+
+    # 2B止盈策略（也使用零成本持仓）
+    b2_use_zero_cost_strategy: bool = True  # 2B单使用零成本策略
+    b2_zero_cost_trigger_rr: float = 2.0  # 2B单零成本触发条件
+    b2_trailing_stop_atr_mult: float = 5.0  # 2B单trailing stop
+    b2_trailing_offset_atr_mult: float = 2.0  # 2B单trailing offset
 
 
 class SRShortStrategy(BaseStrategy):
@@ -231,11 +301,19 @@ class SRShortStrategy(BaseStrategy):
         # Step 4: Align zones back to original timeframe
         zone_columns = ['zone_top', 'zone_bottom', 'zone_touches', 'zone_is_broken']
 
-        # Reindex zones_htf to match data index using forward fill
-        zones_aligned = zones_htf[zone_columns].reindex(
-            data.index,
-            method='ffill'  # Forward fill: use latest HTF zone for each bar
-        )
+        # Map each 15m bar to its corresponding 4H bar (no forward fill!)
+        # This ensures we only use zone data from the exact 4H bar, not from past bars
+        htf_minutes = self._timeframe_to_minutes(self.config.htf_timeframe)
+        data_with_htf_index = data.copy()
+        data_with_htf_index['htf_time'] = data.index.floor(f'{htf_minutes}min')
+
+        # Merge zones from 4H to 15m (left join on htf_time)
+        zones_aligned = data_with_htf_index[['htf_time']].merge(
+            zones_htf[zone_columns],
+            left_on='htf_time',
+            right_index=True,
+            how='left'
+        ).drop(columns=['htf_time'])
 
         # Step 5: Add ATR(200) on original timeframe
         from analytics.indicators.volatility import calculate_atr
@@ -327,20 +405,28 @@ class SRShortStrategy(BaseStrategy):
         entry_condition = zone_qualified & inside_zone
 
         # Track positions for TP1 and trailing stop
-        # Each position tracks: entry info, TP1 status, trailing stop
+        # Each position tracks: entry info, TP1 status, trailing stop, is_2b_trade
         positions = []  # List of position dicts
-        
+
         # Track which zones have been used for entries
         # Key: (zone_bottom, zone_top), Value: True if position opened in this zone
         used_zones = set()
-        
+
+        # Track zones that were broken (stopped out) for 2B reversal
+        # Key: (zone_bottom, zone_top)
+        # Value: {'stop_time': timestamp, 'stop_price': float, 'entry_price': float, 'entry_atr': float}
+        broken_zones = {}
+
         # Track order types for each order
         order_types = pd.Series('', index=orders.index, dtype='object')
         
         for i in range(len(data)):
             current_price = data['close'].iloc[i]
             current_atr = data['atr'].iloc[i] if pd.notna(data['atr'].iloc[i]) else 0
-            
+
+            # Track if we had an exit on this bar to prevent same-bar re-entry
+            had_exit_this_bar = False
+
             # Check exits for existing positions FIRST (before new entries)
             # This ensures we handle exits before new entries on the same bar
             positions_to_remove = []
@@ -348,9 +434,24 @@ class SRShortStrategy(BaseStrategy):
                 entry_price = pos['entry_price']
                 entry_atr = pos['entry_atr']
                 position_size = pos['entry_size']  # Absolute size
-                
+                is_2b_trade = pos.get('is_2b_trade', False)
+
+                # Use different parameters for 2B trades
+                if is_2b_trade:
+                    stop_loss_mult = self.config.b2_stop_loss_atr_mult
+                    trailing_stop_mult = self.config.b2_trailing_stop_atr_mult
+                    trailing_offset_mult = self.config.b2_trailing_offset_atr_mult
+                    use_zero_cost = self.config.b2_use_zero_cost_strategy
+                    zero_cost_rr = self.config.b2_zero_cost_trigger_rr
+                else:
+                    stop_loss_mult = self.config.stop_loss_atr_mult
+                    trailing_stop_mult = self.config.trailing_stop_atr_mult
+                    trailing_offset_mult = self.config.trailing_offset_atr_mult
+                    use_zero_cost = self.config.use_zero_cost_strategy
+                    zero_cost_rr = self.config.zero_cost_trigger_rr
+
                 # Calculate risk (for short: risk = entry_price - SL_price)
-                sl_price = entry_price + (entry_atr * self.config.stop_loss_atr_mult)
+                sl_price = entry_price + (entry_atr * stop_loss_mult)
                 risk = entry_price - sl_price  # Negative for short, but we use abs
                 risk = abs(risk)
                 
@@ -362,24 +463,48 @@ class SRShortStrategy(BaseStrategy):
                 if current_price < pos['highest_profit_price']:
                     pos['highest_profit_price'] = current_price
                 
-                # Check TP1: profit >= tp1_rr_ratio * risk
+                # Check TP1: Zero-Cost Position Strategy or Fixed R:R
                 if not pos['tp1_hit'] and risk > 0:
-                    tp1_profit_target = risk * self.config.tp1_rr_ratio
-                    if profit >= tp1_profit_target:
-                        # TP1 hit: partial close (30% of position)
-                        partial_size = position_size * self.config.tp1_exit_pct
+                    # Determine which TP1 strategy to use (account for 2B trades)
+                    if use_zero_cost:
+                        # Zero-Cost Strategy: Trigger at zero_cost_trigger_rr
+                        tp1_trigger_rr = zero_cost_rr
+                        tp1_exit_pct = self.config.zero_cost_exit_pct
+                    else:
+                        # Traditional Fixed R:R Strategy
+                        tp1_trigger_rr = self.config.tp1_rr_ratio
+                        tp1_exit_pct = self.config.tp1_exit_pct
+
+                    # Calculate profit ratio (profit / risk)
+                    profit_ratio = profit / risk
+
+                    # Check if TP1 should trigger
+                    if profit_ratio >= tp1_trigger_rr:
+                        # TP1 hit: partial close
+                        # IMPORTANT: Use absolute BTC amount (not fraction)
+                        # This is the amount to close, not remaining
+                        partial_size = position_size * tp1_exit_pct
                         orders.iloc[i] = partial_size  # Positive to close short
                         order_types.iloc[i] = 'TP1'  # Mark as TP1 exit
                         pos['tp1_hit'] = True
-                        pos['entry_size'] = position_size * (1 - self.config.tp1_exit_pct)  # Update remaining size
+                        pos['entry_size'] = position_size * (1 - tp1_exit_pct)  # Update remaining size
+
+                        # Log zero-cost achievement
+                        if self.config.use_zero_cost_strategy:
+                            locked_profit = partial_size * profit / position_size
+                            # For short: locked_profit should equal risk for zero-cost
+                            print(f"[Zero-Cost TP1] Triggered at {profit_ratio:.2f}R, "
+                                  f"Exit {tp1_exit_pct*100:.0f}%, "
+                                  f"Locked ${locked_profit:.2f} ≈ Risk ${risk:.2f}")
+
                         # Position continues with trailing stop
                         continue
                 
                 # Check trailing stop (only after TP1)
                 if pos['tp1_hit']:
-                    # Calculate trailing stop price
-                    trailing_stop_distance = entry_atr * self.config.trailing_stop_atr_mult
-                    trailing_offset = entry_atr * self.config.trailing_offset_atr_mult
+                    # Calculate trailing stop price (use 2B parameters if applicable)
+                    trailing_stop_distance = entry_atr * trailing_stop_mult
+                    trailing_offset = entry_atr * trailing_offset_mult
                     
                     # Trailing stop price = lowest_price + trailing_stop_distance - offset
                     new_trailing_stop = pos['highest_profit_price'] + trailing_stop_distance - trailing_offset
@@ -392,20 +517,41 @@ class SRShortStrategy(BaseStrategy):
                     
                     # Check if price hit trailing stop
                     if current_price >= pos['trailing_stop_price']:
-                        # Close remaining position
-                        remaining_size = pos['entry_size']
-                        orders.iloc[i] = remaining_size  # Positive to close short
+                        # Close remaining position (100% of what's left)
+                        # IMPORTANT: Use 1.0 (not absolute BTC amount) to close all remaining
+                        # VectorBT interprets this as fraction of current_position_btc
+                        orders.iloc[i] = 1.0  # Close 100% of remaining position
                         order_types.iloc[i] = 'TP2'  # Mark as TP2 (trailing stop exit)
                         positions_to_remove.append(pos_idx)
+                        had_exit_this_bar = True
                         continue
                 
                 # Check initial stop loss (only if TP1 not hit)
                 if not pos['tp1_hit']:
                     if current_price >= sl_price:
-                        # Close entire position at SL
-                        orders.iloc[i] = position_size  # Positive to close short
+                        # Close entire position at SL (100% of current position)
+                        # IMPORTANT: Use 1.0 to close all remaining (not absolute BTC amount)
+                        orders.iloc[i] = 1.0  # Close 100% of position
                         order_types.iloc[i] = 'SL'  # Mark as Stop Loss exit
                         positions_to_remove.append(pos_idx)
+                        had_exit_this_bar = True
+
+                        # Record this zone as broken for potential 2B reversal
+                        # Only record if this is NOT already a 2B trade and 2B is enabled
+                        if self.config.enable_2b_reversal and not pos.get('is_2b_trade', False):
+                            if 'zone_key' in pos:
+                                zone_key = pos['zone_key']
+                                current_time = data.index[i]
+                                broken_zones[zone_key] = {
+                                    'stop_time': current_time,
+                                    'stop_price': current_price,
+                                    'entry_price': pos['entry_price'],
+                                    'entry_atr': pos['entry_atr'],
+                                    'zone_bottom': zone_key[0],
+                                    'zone_top': zone_key[1],
+                                }
+                                print(f"[2B Tracker] Zone {zone_key} broken at {current_time}, SL @ ${current_price:,.2f}")
+
                         continue
             
             # Remove exited positions
@@ -418,14 +564,83 @@ class SRShortStrategy(BaseStrategy):
                 positions.pop(pos_idx)
             
             # Check for new entries AFTER handling exits
-            # Rules:
-            # 1. No existing positions (len(positions) == 0)
-            # 2. Entry condition must be met
-            # 3. This zone hasn't been used yet (to avoid multiple entries in same zone)
-            # Note: We allow entry even if there's an exit order on this bar,
-            # because VectorBT processes orders sequentially and we want to allow
-            # immediate re-entry after position closes
-            if entry_condition.iloc[i] and len(positions) == 0:
+            # Priority 1: Check 2B Reversal opportunities (higher priority)
+            # Priority 2: Check normal entry conditions
+
+            # ========================================
+            # 2B Reversal Entry Check
+            # ========================================
+            b2_entry_triggered = False
+            b2_zone_info = None
+
+            if self.config.enable_2b_reversal and len(positions) == 0 and not had_exit_this_bar:
+                current_time = data.index[i]
+
+                # Check all broken zones for 2B reversal opportunities
+                zones_to_remove = []
+                for zone_key, zone_info in broken_zones.items():
+                    # Time window check: within b2_time_window_hours
+                    time_diff = (current_time - zone_info['stop_time']).total_seconds() / 3600
+                    if time_diff > self.config.b2_time_window_hours:
+                        # Expired, remove from broken_zones
+                        zones_to_remove.append(zone_key)
+                        continue
+
+                    # Price check: closed below zone_bottom
+                    zone_bottom = zone_info['zone_bottom']
+                    breakout_threshold = zone_bottom * (1 - self.config.b2_breakout_threshold_pct / 100)
+
+                    if current_price <= breakout_threshold:
+                        # 2B Reversal triggered!
+                        b2_entry_triggered = True
+                        b2_zone_info = zone_info
+                        zones_to_remove.append(zone_key)  # Remove after using
+
+                        print(f"[2B Reversal] Triggered at {current_time}!")
+                        print(f"  Zone: ${zone_bottom:,.2f} - ${zone_info['zone_top']:,.2f}")
+                        print(f"  Stop time: {zone_info['stop_time']}, Window: {time_diff:.1f}h")
+                        print(f"  Current price: ${current_price:,.2f} (below ${zone_bottom:,.2f})")
+                        break  # Only take first 2B opportunity
+
+                # Clean up expired/used zones
+                for zone_key in zones_to_remove:
+                    del broken_zones[zone_key]
+
+            # ========================================
+            # Execute 2B Entry or Normal Entry
+            # ========================================
+            if b2_entry_triggered:
+                # 2B Reversal Entry
+                zone_key = (b2_zone_info['zone_bottom'], b2_zone_info['zone_top'])
+
+                # 2B trades use higher risk: 2% vs normal 0.5% = 4x multiplier
+                # We encode this in the entry_size signal
+                risk_multiplier = self.config.b2_risk_per_trade_pct / self.config.risk_per_trade_pct
+                entry_size = -1.0 * risk_multiplier  # Negative for short, scaled by risk
+
+                # Use 2B-specific risk parameters
+                positions.append({
+                    'entry_idx': i,
+                    'entry_price': current_price,
+                    'entry_atr': current_atr,
+                    'entry_size': abs(entry_size),
+                    'tp1_hit': False,
+                    'highest_profit_price': current_price,
+                    'trailing_stop_price': None,
+                    'zone_key': zone_key,
+                    'is_2b_trade': True,  # Mark as 2B trade
+                    'b2_original_entry': b2_zone_info['entry_price'],  # Track original entry
+                })
+
+                # Mark zone as used (2B trades also consume the zone)
+                used_zones.add(zone_key)
+
+                # Place entry order
+                orders.iloc[i] = entry_size
+                order_types.iloc[i] = '2B_ENTRY'  # Mark as 2B reversal entry
+
+            elif entry_condition.iloc[i] and len(positions) == 0 and not had_exit_this_bar:
+                # Normal Entry (original logic)
                 # Get current zone info from data
                 zone_bottom_val = data['zone_bottom'].iloc[i] if 'zone_bottom' in data.columns else None
                 zone_top_val = data['zone_top'].iloc[i] if 'zone_top' in data.columns else None
@@ -440,7 +655,7 @@ class SRShortStrategy(BaseStrategy):
                         # For now, we use 1.0 as base size (100% of calculated size)
                         # The engine will convert this to actual BTC amount based on equity and leverage
                         entry_size = -1.0  # Negative for short (will be scaled by engine)
-                        
+
                         # New position entry
                         positions.append({
                             'entry_idx': i,
@@ -452,19 +667,29 @@ class SRShortStrategy(BaseStrategy):
                             'trailing_stop_price': None,
                             'zone_key': zone_key,  # Track which zone this position is in
                         })
-                        
+
                         # Mark this zone as used
                         used_zones.add(zone_key)
-                        
+
                         # Place entry order
                         orders.iloc[i] = entry_size
                         order_types.iloc[i] = 'ENTRY'  # Mark as entry order
+
+        # Force close any remaining positions at the end of backtest
+        # This ensures all PnL is realized and prevents unrealized P&L from affecting total_return
+        if positions:
+            last_bar_idx = len(data) - 1
+            for pos in positions:
+                # Close each remaining position at the last bar
+                orders.iloc[last_bar_idx] = 1.0  # Close 100% of remaining position
+                order_types.iloc[last_bar_idx] = 'FORCE_CLOSE'  # Mark as forced close at end
+                print(f"[WARNING] Force closing position at end of backtest: Entry @ {pos['entry_price']}, Size @ {pos['entry_size']}")
 
         # Return orders as DataFrame (for compatibility with existing interface)
         return pd.DataFrame({
             'orders': orders,  # Order sizes (negative for short, positive to close)
             'direction': direction,  # Keep for compatibility
-            'order_types': order_types,  # Order type: ENTRY, TP1, TP2, SL
+            'order_types': order_types,  # Order type: ENTRY, TP1, TP2, SL, FORCE_CLOSE
         }, index=data.index)
 
     def calculate_position_size(

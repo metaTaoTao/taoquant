@@ -1,7 +1,11 @@
 {
   "permissions": {
     "allow": [
-      "mcp__pinescript-mcp-server__fix_pinescript_errors"
+      "mcp__pinescript-mcp-server__fix_pinescript_errors",
+      "Bash(python run/run_backtest.py:*)",
+      "Bash(python debug_zones.py:*)",
+      "Bash(python:*)",
+      "Bash(grep:*)"
     ],
     "deny": [],
     "ask": []

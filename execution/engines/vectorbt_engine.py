@@ -1232,9 +1232,24 @@ class VectorBTEngine(BacktestEngine):
             except:
                 sortino_ratio = 0
 
+            # Calculate total PnL from portfolio value (more accurate than summing trades)
+            # This captures all P&L including force-closed positions and partially closed trades
+            try:
+                value_series = portfolio.value()  # Get portfolio value time series
+                final_value = value_series.iloc[-1]  # Last value
+                initial_value = value_series.iloc[0]  # Initial value
+                total_pnl = final_value - initial_value
+            except Exception as e:
+                # Fallback: derive from total_return
+                # total_return = (final - initial) / initial
+                # So: total_pnl = total_return * initial
+                # We need to get initial_cash from somewhere
+                total_pnl = 0.0
+
             metrics = {
                 # Returns
                 'total_return': float(total_return) if not np.isnan(total_return) else 0.0,
+                'total_pnl': float(total_pnl) if not np.isnan(total_pnl) else 0.0,
 
                 # Risk-adjusted returns
                 'sharpe_ratio': float(sharpe_ratio) if not np.isnan(sharpe_ratio) else 0.0,

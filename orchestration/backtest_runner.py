@@ -188,7 +188,7 @@ class BacktestRunner:
         # Step 1: Load data
         print("[Data] Loading data...")
         data = self._load_data(config)
-        print(f"   ✓ Loaded {len(data)} bars from {data.index[0]} to {data.index[-1]}")
+        print(f"   [OK] Loaded {len(data)} bars from {data.index[0]} to {data.index[-1]}")
 
         # Step 2: Run strategy
         print(f"[Strategy] Running strategy: {config.strategy.get_name()}...")
@@ -203,11 +203,11 @@ class BacktestRunner:
             num_orders = (signals['orders'] != 0).sum()
             entry_orders = (signals['orders'] < 0).sum()
             exit_orders = (signals['orders'] > 0).sum()
-            print(f"   ✓ Generated {num_orders} orders ({entry_orders} entries, {exit_orders} exits)")
+            print(f"   [OK] Generated {num_orders} orders ({entry_orders} entries, {exit_orders} exits)")
         else:
             # Signal-based mode (legacy)
             num_signals = signals['entry'].sum() if 'entry' in signals.columns else 0
-            print(f"   ✓ Generated {num_signals} entry signals")
+            print(f"   [OK] Generated {num_signals} entry signals")
         
         # Store data_with_indicators for visualization (contains zones)
         self._data_with_indicators = data_with_indicators
@@ -220,7 +220,7 @@ class BacktestRunner:
             sizes=sizes,
             config=config.backtest_config,
         )
-        print(f"   ✓ Executed {len(result.trades)} trades")
+        print(f"   [OK] Executed {len(result.trades)} trades")
 
         # Step 4: Export results
         if config.save_results:
@@ -316,7 +316,7 @@ class BacktestRunner:
         if config.save_trades and not result.trades.empty:
             trades_path = config.output_dir / f"{prefix}_trades.csv"
             result.trades.to_csv(trades_path, index=False)
-            print(f"   ✓ Saved trades: {trades_path}")
+            print(f"   [OK] Saved trades: {trades_path}")
         
         # Save individual orders if available
         if hasattr(result, 'metadata') and result.metadata:
@@ -324,13 +324,13 @@ class BacktestRunner:
             if orders_df is not None and not orders_df.empty:
                 orders_path = config.output_dir / f"{prefix}_orders.csv"
                 orders_df.to_csv(orders_path, index=False)
-                print(f"   ✓ Saved orders: {orders_path}")
+                print(f"   [OK] Saved orders: {orders_path}")
 
         # Export equity curve
         if config.save_equity and not result.equity_curve.empty:
             equity_path = config.output_dir / f"{prefix}_equity.csv"
             result.equity_curve.to_csv(equity_path)
-            print(f"   ✓ Saved equity curve: {equity_path}")
+            print(f"   [OK] Saved equity curve: {equity_path}")
 
         # Export metrics
         if config.save_metrics:
@@ -338,7 +338,7 @@ class BacktestRunner:
             metrics_path = config.output_dir / f"{prefix}_metrics.json"
             with open(metrics_path, 'w') as f:
                 json.dump(result.metrics, f, indent=2)
-            print(f"   ✓ Saved metrics: {metrics_path}")
+            print(f"   [OK] Saved metrics: {metrics_path}")
 
         # Generate and save plots
         if config.save_plot:
@@ -378,7 +378,7 @@ class BacktestRunner:
                     title=title,
                 )
             except Exception as e:
-                print(f"   ⚠️  Warning: Failed to generate custom plot: {e}")
+                print(f"   [Warning] Failed to generate custom plot: {e}")
             
             # 2. VectorBT built-in performance plots (权益曲线、回撤、性能指标)
             # Note: VectorBT plots require anywidget for interactive plots
@@ -407,10 +407,10 @@ class BacktestRunner:
                     
                     if fig is not None:
                         fig.write_html(str(vbt_plot_path))
-                        print(f"   ✓ Saved VectorBT performance plots: {vbt_plot_path}")
+                        print(f"   [OK] Saved VectorBT performance plots: {vbt_plot_path}")
             except Exception as e:
                 # VectorBT plots require anywidget - this is optional
                 if "anywidget" in str(e).lower() or "FigureWidget" in str(e):
-                    print(f"   ⚠️  Warning: VectorBT interactive plots require anywidget. Install with: pip install anywidget")
+                    print(f"   [Warning] VectorBT interactive plots require anywidget. Install with: pip install anywidget")
                 else:
-                    print(f"   ⚠️  Warning: Failed to generate VectorBT plots: {e}")
+                    print(f"   [Warning] Failed to generate VectorBT plots: {e}")

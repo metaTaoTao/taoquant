@@ -409,7 +409,7 @@ def plot_backtest_results(
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_file(str(output_path))
         save(layout)
-        print(f"📊 Plot saved to: {output_path}")
+        print(f"[Plot] Plot saved to: {output_path}")
     else:
         # Return layout for display (e.g., in notebook)
         return layout

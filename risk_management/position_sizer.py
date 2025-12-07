@@ -63,7 +63,11 @@ def calculate_risk_based_size(
     2. position_qty = risk_amount / stop_distance
     3. position_value = position_qty * current_price
     4. size_fraction = position_value / equity
-    5. size_fraction *= leverage (if using leverage)
+
+    IMPORTANT: Leverage is NOT applied to position size!
+    - Leverage only affects margin requirement
+    - Risk per trade remains constant regardless of leverage
+    - Example: 0.5% risk means $500 loss whether using 1x or 5x leverage
 
     Parameters
     ----------
@@ -77,7 +81,8 @@ def calculate_risk_based_size(
     risk_per_trade : float
         Risk percentage per trade (0.01 = 1%)
     leverage : float
-        Leverage multiplier (default: 1.0 = no leverage)
+        DEPRECATED - Not used. Kept for backward compatibility.
+        Leverage should be configured in the backtest engine, not here.
 
     Returns
     -------
@@ -93,7 +98,7 @@ def calculate_risk_based_size(
     ...     stop_distance=stop_distance,
     ...     current_price=data['close'],
     ...     risk_per_trade=0.01,
-    ...     leverage=5.0
+    ...     leverage=1.0  # Ignored - configure leverage in BacktestConfig
     ... )
 
     Notes
@@ -102,21 +107,28 @@ def calculate_risk_based_size(
     - Automatically adjusts position size based on stop distance
     - Wider stops = smaller positions
     - Tighter stops = larger positions
+    - Leverage does NOT affect position size (only margin requirement)
     """
     # Calculate risk amount
     risk_amount = equity * risk_per_trade
 
     # Calculate position quantity in base asset
+    # This is the actual position size needed to achieve target risk
     position_qty = risk_amount / stop_distance
 
     # Convert to position value
     position_value = position_qty * current_price
 
     # Convert to fraction of equity
+    # Note: We do NOT multiply by leverage here!
+    # Leverage affects margin requirement, not position size or risk.
+    # If you want to risk 0.5% with a $1000 stop, you should trade
+    # the same size whether using 1x or 5x leverage.
     size_fraction = position_value / equity
 
-    # Apply leverage
-    size_fraction = size_fraction * leverage
+    # IMPORTANT: Leverage is NOT applied to size_fraction
+    # VectorBT will handle leverage when calculating margin requirements
+    # Applying leverage here would multiply your risk by leverage amount!
 
     return size_fraction.fillna(0)
 
