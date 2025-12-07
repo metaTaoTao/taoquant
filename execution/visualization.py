@@ -604,8 +604,8 @@ def _plot_orders_bokeh(
         
         timestamp_ts = pd.Timestamp(timestamp)
         
-        # Entry orders (ENTRY type)
-        if order_type == "ENTRY":
+        # Entry orders (ENTRY or 2B_ENTRY type)
+        if order_type in ["ENTRY", "2B_ENTRY"]:
             entry_key = timestamp_ts
             if entry_key not in seen_entries:
                 # Use order price (already includes slippage/fees from VectorBT)

@@ -481,9 +481,10 @@ class SRShortStrategy(BaseStrategy):
                     # Check if TP1 should trigger
                     if profit_ratio >= tp1_trigger_rr:
                         # TP1 hit: partial close
-                        # IMPORTANT: Use absolute BTC amount (not fraction)
-                        # This is the amount to close, not remaining
-                        partial_size = position_size * tp1_exit_pct
+                        # IMPORTANT: Engine expects FRACTION (0.0-1.0) for exits, not absolute size
+                        # Engine will calculate: current_position * fraction
+                        # So we just pass the exit percentage directly
+                        partial_size = tp1_exit_pct  # Just the fraction (e.g., 0.30 for 30%)
                         orders.iloc[i] = partial_size  # Positive to close short
                         order_types.iloc[i] = 'TP1'  # Mark as TP1 exit
                         pos['tp1_hit'] = True
@@ -491,7 +492,9 @@ class SRShortStrategy(BaseStrategy):
 
                         # Log zero-cost achievement
                         if self.config.use_zero_cost_strategy:
-                            locked_profit = partial_size * profit / position_size
+                            # partial_size is now just the fraction (e.g., 0.30)
+                            # locked_profit = fraction * total_profit
+                            locked_profit = partial_size * profit
                             # For short: locked_profit should equal risk for zero-cost
                             print(f"[Zero-Cost TP1] Triggered at {profit_ratio:.2f}R, "
                                   f"Exit {tp1_exit_pct*100:.0f}%, "

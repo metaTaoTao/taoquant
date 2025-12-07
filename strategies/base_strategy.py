@@ -12,6 +12,11 @@ Design Principles:
 - Pure Functions: each step should be deterministic
 - No Side Effects: strategies don't manage state or execute trades
 - Type-Safe: full type hints for compile-time safety
+
+IMPORTANT: All strategy development must follow CLAUDE.md rules:
+- Priority 1: Comply with TaoQuant Architecture (docs/system_design.md)
+- Priority 2: Follow CLAUDE.md guidelines
+- See CLAUDE.md for complete coding standards and workflow
 """
 
 from __future__ import annotations

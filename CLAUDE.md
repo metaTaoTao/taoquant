@@ -2,6 +2,10 @@
 
 This file provides comprehensive guidance for AI assistants (Claude, GPT, etc.) when working with the TaoQuant codebase. It defines the project's architecture, coding standards, workflows, and the role of AI as a quantitative researcher and engineer.
 
+> **⚠️ IMPORTANT**: This document is automatically loaded as workspace rules. All AI assistants MUST follow these rules, especially the Priority Rules section. When in doubt, refer to this document first.
+>
+> **Quick Check**: Before submitting code, verify compliance using `docs/CLAUDE_CHECKLIST.md`.
+
 ---
 
 ## 🎯 Your Role
