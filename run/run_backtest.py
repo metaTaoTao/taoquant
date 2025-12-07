@@ -42,10 +42,10 @@ from orchestration.backtest_runner import BacktestRunner, BacktestRunConfig
 SYMBOL = "BTCUSDT"
 TIMEFRAME = "15m"
 START = pd.Timestamp("2025-7-01", tz="UTC")
-END = pd.Timestamp("2025-10-01", tz="UTC")
+END = pd.Timestamp("2025-12-01", tz="UTC")
 SOURCE = "okx"  # 'okx', 'binance', or 'csv'
 
-# Strategy parameters
+# Strategy parameters (Signal Processor Architecture)
 STRATEGY_CONFIG = SRShortConfig(
     name="SR Short 4H",
     description="Short-only strategy based on 4H resistance zones",
@@ -53,13 +53,14 @@ STRATEGY_CONFIG = SRShortConfig(
     # ============================================================
     # Zone Detection Parameters
     # ============================================================
-    left_len=30,  # 30*4h = 120h = 5 days lookback (more sensitive)
-    right_len=5,  # 5*4h = 20h confirmation (faster confirmation)
+    htf_timeframe='4h',
+    htf_lookback=300,
+    left_len=90,  # Conservative: 90*4h = 360h = 15 days
+    right_len=10,  # 10*4h = 40h confirmation
     merge_atr_mult=3.5,
 
     # Entry filters
     min_touches=1,
-    max_retries=3,
 
     # ============================================================
     # Normal Trade Risk Management
@@ -75,7 +76,6 @@ STRATEGY_CONFIG = SRShortConfig(
     use_zero_cost_strategy=True,  # 使用零成本持仓策略
     zero_cost_trigger_rr=3.33,  # 达到3.33R时触发（公式：1/0.3=3.33）
     zero_cost_exit_pct=0.30,  # 平掉30%锁定1R利润
-    zero_cost_lock_risk=True,  # 锁定初始风险，剩余70%trailing stop
 
     # Trailing stop parameters
     trailing_stop_atr_mult=5.0,  # Trailing stop距离

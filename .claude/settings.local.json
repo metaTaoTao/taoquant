@@ -5,7 +5,10 @@
       "Bash(python run/run_backtest.py:*)",
       "Bash(python debug_zones.py:*)",
       "Bash(python:*)",
-      "Bash(grep:*)"
+      "Bash(grep:*)",
+      "Bash(pip install:*)",
+      "Bash(ls:*)",
+      "Bash(find:*)"
     ],
     "deny": [],
     "ask": []
