@@ -564,6 +564,7 @@ def _plot_orders_bokeh(
 ) -> None:
     """
     Plot order entry and exit points from orders.csv (more accurate than trades.csv for partial exits).
+    Also supports grid strategy orders (buy/sell with direction).
 
     Parameters
     ----------
@@ -571,6 +572,7 @@ def _plot_orders_bokeh(
         Bokeh figure to add orders to
     orders : pd.DataFrame
         Orders DataFrame with timestamp, price, size, direction, order_type
+        For grid strategy: direction='buy' or 'sell', order_type='ENTRY' or 'EXIT'
     data : pd.DataFrame
         OHLCV data
     """
@@ -578,111 +580,136 @@ def _plot_orders_bokeh(
         return
     
     # Prepare order data
-    entry_times = []
-    entry_prices = []
-    exit_times = []
-    exit_prices = []
-    exit_colors_list = []
-    trade_sizes = []
+    buy_times = []
+    buy_prices = []
+    sell_times = []
+    sell_prices = []
+    buy_sizes = []
+    sell_sizes = []
     
     # Ensure timestamp is datetime
     if 'timestamp' in orders.columns:
         orders['timestamp'] = pd.to_datetime(orders['timestamp'])
+    elif 'time' in orders.columns:
+        orders['timestamp'] = pd.to_datetime(orders['time'])
     
-    # Track unique entries to avoid duplicates
-    seen_entries = set()
+    # Check if this is grid strategy format (has 'direction' column)
+    is_grid_strategy = 'direction' in orders.columns
     
     for _, order in orders.iterrows():
-        timestamp = order.get("timestamp")
+        timestamp = order.get("timestamp") or order.get("time")
         price = order.get("price")
-        size = order.get("size", 0)
-        order_type = order.get("order_type", "")
+        size = abs(order.get("size", 0))  # Use absolute size
         direction = order.get("direction", "")
+        order_type = order.get("order_type", "")
         
-        if pd.isna(timestamp):
+        if pd.isna(timestamp) or pd.isna(price) or price <= 0:
             continue
         
         timestamp_ts = pd.Timestamp(timestamp)
         
-        # Entry orders (ENTRY or 2B_ENTRY type)
-        if order_type in ["ENTRY", "2B_ENTRY"]:
-            entry_key = timestamp_ts
-            if entry_key not in seen_entries:
-                # Use order price (already includes slippage/fees from VectorBT)
-                if pd.notna(price) and price > 0:
-                    entry_times.append(timestamp)
-                    entry_prices.append(price)
-                    trade_sizes.append(size)
-                    seen_entries.add(entry_key)
-        
-        # Exit orders (TP1, TP2, SL)
-        elif order_type in ["TP1", "TP2", "SL"]:
-            # Use order price (already includes slippage/fees from VectorBT)
-            if pd.notna(price) and price > 0:
-                exit_times.append(timestamp)
-                exit_prices.append(price)
-                # Determine color based on order type
-                if order_type == "SL":
-                    exit_colors_list.append("#ef5350")  # Red for stop loss
+        if is_grid_strategy:
+            # Grid strategy: use direction directly
+            if direction == 'buy':
+                buy_times.append(timestamp)
+                buy_prices.append(price)
+                buy_sizes.append(size)
+            elif direction == 'sell':
+                sell_times.append(timestamp)
+                sell_prices.append(price)
+                sell_sizes.append(size)
+        else:
+            # Traditional strategy: use order_type
+            if order_type in ["ENTRY", "2B_ENTRY"]:
+                # Entry orders
+                if direction == 'buy' or size > 0:
+                    buy_times.append(timestamp)
+                    buy_prices.append(price)
+                    buy_sizes.append(size)
                 else:
-                    # For TP1/TP2, determine color based on P&L
-                    # For short: profit when exit_price < entry_price
-                    # Find corresponding entry_price (most recent entry before this exit)
-                    matching_entry_price = None
-                    for i, et in enumerate(entry_times):
-                        if pd.Timestamp(et) <= timestamp_ts:  # Entry before or at exit
-                            matching_entry_price = entry_prices[i]
-                    
-                    if matching_entry_price is not None:
-                        # For short: profit when exit_price < entry_price
-                        is_profit = price < matching_entry_price
-                        exit_colors_list.append("#26a69a" if is_profit else "#ef5350")
-                    else:
-                        exit_colors_list.append("#26a69a")  # Default to green
+                    sell_times.append(timestamp)
+                    sell_prices.append(price)
+                    sell_sizes.append(size)
+            elif order_type in ["TP1", "TP2", "SL", "EXIT"]:
+                # Exit orders
+                if direction == 'sell' or size < 0:
+                    sell_times.append(timestamp)
+                    sell_prices.append(price)
+                    sell_sizes.append(abs(size))
+                else:
+                    buy_times.append(timestamp)
+                    buy_prices.append(price)
+                    buy_sizes.append(size)
     
-    # Plot entry markers (red downward triangles for short entries)
-    if entry_times:
-        entry_source = ColumnDataSource({
-            'date': entry_times,
-            'price': entry_prices,
-            'size': trade_sizes,
+    # Plot buy markers (green upward triangles)
+    if buy_times:
+        buy_source = ColumnDataSource({
+            'date': buy_times,
+            'price': buy_prices,
+            'size': buy_sizes[:len(buy_times)],
         })
-        entry_markers = p.scatter(
+        buy_markers = p.scatter(
             x='date',
             y='price',
-            source=entry_source,
-            size=15,
-            marker="inverted_triangle",
-            color="#ef5350",  # Red for short entry
-            fill_alpha=0.9,
-            line_color="#ffffff",
-            line_width=2,
-            legend_label="Entry (Short)",
-        )
-    
-    # Plot exit markers (colored by P&L)
-    if exit_times:
-        exit_source = ColumnDataSource({
-            'date': exit_times,
-            'price': exit_prices,
-            'color': exit_colors_list,
-        })
-        exit_markers = p.scatter(
-            x='date',
-            y='price',
-            source=exit_source,
-            size=15,
+            source=buy_source,
+            size=12,
             marker="triangle",
-            color='color',  # Color from source (green for profit, red for loss)
-            fill_alpha=0.9,
+            color="#26a69a",  # Green for buy
+            fill_alpha=0.8,
             line_color="#ffffff",
-            line_width=2,
-            legend_label="Exit",
+            line_width=1.5,
+            legend_label="买入",
         )
+        
+        # Add hover tool for buy orders
+        buy_hover = HoverTool(
+            tooltips=[
+                ("时间", "@date{%Y-%m-%d %H:%M}"),
+                ("价格", "@price{0,0.00}"),
+                ("数量", "@size{0,0.0000}"),
+            ],
+            formatters={
+                '@date': 'datetime',
+            },
+            mode='mouse',
+            renderers=[buy_markers],
+        )
+        p.add_tools(buy_hover)
     
-    # Draw lines connecting entries to exits (for visualization)
-    # This is complex with partial exits, so we'll skip it for now
-    # Users can see entry/exit points clearly from markers
+    # Plot sell markers (red downward triangles)
+    if sell_times:
+        sell_source = ColumnDataSource({
+            'date': sell_times,
+            'price': sell_prices,
+            'size': sell_sizes[:len(sell_times)],
+        })
+        sell_markers = p.scatter(
+            x='date',
+            y='price',
+            source=sell_source,
+            size=12,
+            marker="inverted_triangle",
+            color="#ef5350",  # Red for sell
+            fill_alpha=0.8,
+            line_color="#ffffff",
+            line_width=1.5,
+            legend_label="卖出",
+        )
+        
+        # Add hover tool for sell orders
+        sell_hover = HoverTool(
+            tooltips=[
+                ("时间", "@date{%Y-%m-%d %H:%M}"),
+                ("价格", "@price{0,0.00}"),
+                ("数量", "@size{0,0.0000}"),
+            ],
+            formatters={
+                '@date': 'datetime',
+            },
+            mode='mouse',
+            renderers=[sell_markers],
+        )
+        p.add_tools(sell_hover)
 
 
 def _plot_trades_bokeh(
