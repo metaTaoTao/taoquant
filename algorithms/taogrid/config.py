@@ -119,18 +119,38 @@ class TaoGridLeanConfig:
     volatility_threshold: float = 2.0
     volatility_reduction: float = 0.5
 
-    # === Market Maker Risk Zone (MM Risk Mode) ===
+    # === Market Maker Risk Zone (MM Risk Mode) - Tiered Risk Management ===
     # When price breaks below support + volatility buffer, enter risk mode:
     # - Reduce BUY size significantly (small positions to catch falling knife)
     # - Increase SELL size aggressively (de-inventory, sell most holdings)
     # - This mimics market maker behavior: widen spread, reduce inventory risk
     enable_mm_risk_zone: bool = True
-    # Risk zone threshold: support + cushion (volatility buffer)
-    # When price < risk_zone_threshold, enter risk mode
-    mm_risk_buy_multiplier: float = 0.2  # Reduce BUY to 20% of normal size in risk zone
-    mm_risk_sell_multiplier: float = 3.0  # Increase SELL to 300% of normal size in risk zone
-    # Optional: further reduce BUY if inventory is already high in risk zone
+    
+    # Level 1 (Mild Risk): price < support + cushion
+    mm_risk_level1_buy_mult: float = 0.2   # BUY 20% of normal size
+    mm_risk_level1_sell_mult: float = 3.0  # SELL 300% of normal size
     mm_risk_inventory_penalty: float = 0.5  # Additional reduction if inv_ratio > 0.5
+    
+    # Level 2 (Moderate Risk): price stays in risk zone for extended period
+    # Note: Time threshold not set - user will manually update interval if trend reverses
+    mm_risk_level2_buy_mult: float = 0.1   # BUY 10% of normal size
+    mm_risk_level2_sell_mult: float = 4.0  # SELL 400% of normal size
+    
+    # Level 3 (Severe Risk): price < support - 2 × ATR
+    mm_risk_level3_atr_mult: float = 2.0   # Trigger at support - 2 × ATR
+    mm_risk_level3_buy_mult: float = 0.05  # BUY 5% of normal size
+    mm_risk_level3_sell_mult: float = 5.0  # SELL 500% of normal size
+    
+    # Level 4 (Extreme Risk - Grid Shutdown):
+    # Grid will be completely disabled if any of these conditions are met
+    max_risk_atr_mult: float = 3.0  # Price depth: support - 3 × ATR
+    max_risk_loss_pct: float = 0.30  # Unrealized loss: -30% equity
+    max_risk_inventory_pct: float = 0.8  # Inventory risk: 80% capacity
+    # Note: Grid stays disabled until manually re-enabled by user
+    
+    # Profit Protection: use realized profits to buffer risk threshold
+    enable_profit_buffer: bool = True  # Enable profit buffer
+    profit_buffer_ratio: float = 0.5  # 50% of realized profits can buffer risk
 
     # === Backtest Parameters ===
     initial_cash: float = 100000.0
@@ -275,6 +295,32 @@ class TaoGridLeanConfig:
             raise ValueError("vol_trigger_score must be in [0, 1]")
         if self.vol_sell_mult_high < 1.0:
             raise ValueError("vol_sell_mult_high must be >= 1.0")
+
+        # Market Maker Risk Zone validations
+        if not (0.0 <= self.mm_risk_level1_buy_mult <= 1.0):
+            raise ValueError("mm_risk_level1_buy_mult must be in [0, 1]")
+        if self.mm_risk_level1_sell_mult < 1.0:
+            raise ValueError("mm_risk_level1_sell_mult must be >= 1.0")
+        if not (0.0 <= self.mm_risk_inventory_penalty <= 1.0):
+            raise ValueError("mm_risk_inventory_penalty must be in [0, 1]")
+        if not (0.0 <= self.mm_risk_level2_buy_mult <= 1.0):
+            raise ValueError("mm_risk_level2_buy_mult must be in [0, 1]")
+        if self.mm_risk_level2_sell_mult < 1.0:
+            raise ValueError("mm_risk_level2_sell_mult must be >= 1.0")
+        if self.mm_risk_level3_atr_mult <= 0:
+            raise ValueError("mm_risk_level3_atr_mult must be > 0")
+        if not (0.0 <= self.mm_risk_level3_buy_mult <= 1.0):
+            raise ValueError("mm_risk_level3_buy_mult must be in [0, 1]")
+        if self.mm_risk_level3_sell_mult < 1.0:
+            raise ValueError("mm_risk_level3_sell_mult must be >= 1.0")
+        if self.max_risk_atr_mult <= 0:
+            raise ValueError("max_risk_atr_mult must be > 0")
+        if not (0.0 < self.max_risk_loss_pct <= 1.0):
+            raise ValueError("max_risk_loss_pct must be in (0, 1]")
+        if not (0.0 < self.max_risk_inventory_pct <= 1.0):
+            raise ValueError("max_risk_inventory_pct must be in (0, 1]")
+        if not (0.0 <= self.profit_buffer_ratio <= 1.0):
+            raise ValueError("profit_buffer_ratio must be in [0, 1]")
 
         # Market Maker Risk Zone validations
         if not (0.0 <= getattr(self, "mm_risk_buy_multiplier", 0.2) <= 1.0):

@@ -65,6 +65,7 @@ class SimpleLeanRunner:
         # Portfolio state
         self.cash = config.initial_cash
         self.holdings = 0.0  # BTC quantity
+        self.total_cost_basis = 0.0  # Total cost basis for unrealized PnL calculation
         # Track margin-style leverage with negative cash allowed (simplified perp model)
         
         # Grid position tracking (FIFO queue for pairing)
@@ -75,7 +76,7 @@ class SimpleLeanRunner:
     def load_data(self) -> pd.DataFrame:
         """Load historical data."""
         if self.verbose:
-            print("Loading data...")
+        print("Loading data...")
         data_manager = DataManager()
 
         data = data_manager.get_klines(
@@ -87,16 +88,16 @@ class SimpleLeanRunner:
         )
 
         if self.verbose:
-            print(f"  Loaded {len(data)} bars from {data.index[0]} to {data.index[-1]}")
+        print(f"  Loaded {len(data)} bars from {data.index[0]} to {data.index[-1]}")
         return data
 
     def run(self) -> dict:
         """Run backtest."""
         if self.verbose:
-            print("=" * 80)
-            print("TaoGrid Lean Backtest (Simplified Runner)")
-            print("=" * 80)
-            print()
+        print("=" * 80)
+        print("TaoGrid Lean Backtest (Simplified Runner)")
+        print("=" * 80)
+        print()
 
         # Load data
         data = self.load_data()
@@ -207,7 +208,7 @@ class SimpleLeanRunner:
 
         # Initialize algorithm with historical data
         if self.verbose:
-            print("Initializing algorithm...")
+        print("Initializing algorithm...")
         historical_data = data.head(100)  # Use first 100 bars for ATR calc
         self.algorithm.initialize(
             symbol=self.symbol,
@@ -218,8 +219,8 @@ class SimpleLeanRunner:
 
         # Run bar-by-bar
         if self.verbose:
-            print("Running backtest...")
-            print()
+        print("Running backtest...")
+        print()
 
         for i, (timestamp, row) in enumerate(data.iterrows()):
             if self.verbose and i % self.progress_every == 0:
@@ -248,10 +249,14 @@ class SimpleLeanRunner:
 
             # Prepare portfolio state
             current_equity = self.cash + (self.holdings * row['close'])
+            # Calculate unrealized PnL: current value - cost basis
+            current_value = self.holdings * row['close']
+            unrealized_pnl = current_value - self.total_cost_basis
             portfolio_state = {
                 'equity': current_equity,
                 'cash': self.cash,
                 'holdings': self.holdings,
+                'unrealized_pnl': unrealized_pnl,
             }
 
             # Process with TaoGrid algorithm
@@ -292,9 +297,9 @@ class SimpleLeanRunner:
             })
 
         if self.verbose:
-            print()
-            print("  Backtest completed!")
-            print()
+        print()
+        print("  Backtest completed!")
+        print()
 
         # Calculate metrics
         metrics = self.calculate_metrics()
@@ -369,6 +374,8 @@ class SimpleLeanRunner:
             if equity > 0 and new_notional <= max_notional:
                 self.cash -= total_cost
                 self.holdings += size
+                # Update cost basis for unrealized PnL tracking
+                self.total_cost_basis += size * execution_price
 
                 # Add to long positions queue (FIFO)
                 self.long_positions.append({
@@ -411,6 +418,8 @@ class SimpleLeanRunner:
 
                 self.cash += net_proceeds
                 self.holdings -= size
+                # Update cost basis: reduce proportionally when selling
+                # (will be updated more accurately after matching with buy positions)
 
                 # Match against long positions using grid pairing (buy[i] -> sell[i])
                 # Use grid_manager.match_sell_order for proper grid pairing
@@ -451,6 +460,9 @@ class SimpleLeanRunner:
                     
                     trade_pnl = sell_proceeds_portion - buy_cost_portion
                     trade_return_pct = trade_pnl / buy_cost_portion if buy_cost_portion > 0 else 0
+                    
+                    # Update realized PnL in grid manager for profit buffer
+                    self.algorithm.grid_manager.update_realized_pnl(trade_pnl)
 
                     # Record matched trade
                     matched_trades.append({
@@ -639,7 +651,7 @@ class SimpleLeanRunner:
             results['orders'].to_csv(output_dir / "orders.csv", index=False)
 
         if self.verbose:
-            print(f"Results saved to: {output_dir}")
+        print(f"Results saved to: {output_dir}")
 
     def print_summary(self, results: dict):
         """Print results summary."""
@@ -685,7 +697,7 @@ def main():
         description="Inventory-aware grid (perp maker fee 0.02%), focus on max ROE",
 
         # ========== S/R Levels ==========
-        support=111000.0,
+        support=107000.0,
         resistance=123000.0,
         regime="NEUTRAL_RANGE",
 
@@ -735,8 +747,8 @@ def main():
         config=config,
         symbol="BTCUSDT",
         timeframe="1m",
-        start_date=datetime(2025, 7, 10, tzinfo=timezone.utc),
-        end_date=datetime(2025, 8, 10, tzinfo=timezone.utc),
+        start_date=datetime(2025, 9, 26, tzinfo=timezone.utc),
+        end_date=datetime(2025, 10, 26, tzinfo=timezone.utc),
     )
     results = runner.run()
 
@@ -748,8 +760,8 @@ def main():
     runner.save_results(results, output_dir)
 
     if runner.verbose:
-        print()
-        print("Next steps:")
+    print()
+    print("Next steps:")
         print(f"1. Review metrics in: {output_dir}/metrics.json")
         print(f"2. Analyze trades in: {output_dir}/trades.csv")
         print(f"3. Plot equity curve from: {output_dir}/equity_curve.csv")

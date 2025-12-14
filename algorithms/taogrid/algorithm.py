@@ -201,6 +201,43 @@ class TaoGridLeanAlgorithm:
             self._prev_price = current_price
             return None  # No trigger, do nothing
 
+        # Check if grid is disabled (shutdown)
+        if not self.grid_manager.grid_enabled:
+            print(
+                f"[{current_time}] Grid disabled - {self.grid_manager.grid_shutdown_reason}. "
+                f"Waiting for manual re-enable."
+            )
+            self._prev_price = current_price
+            return None  # Grid disabled, do not place orders
+        
+        # Check risk level and potential shutdown
+        equity = portfolio_state.get("equity", self.config.initial_cash)
+        holdings_btc = portfolio_state.get("holdings", 0.0)
+        # Calculate unrealized PnL (simplified: current value - cost basis)
+        # For more accurate calculation, we'd need to track cost basis per position
+        unrealized_pnl = portfolio_state.get("unrealized_pnl", 0.0)
+        
+        risk_level, should_shutdown, shutdown_reason = self.grid_manager.check_risk_level(
+            current_price=current_price,
+            equity=equity,
+            unrealized_pnl=unrealized_pnl,
+            current_time=current_time,
+        )
+        
+        if should_shutdown:
+            print(
+                f"[{current_time}] [WARNING] GRID SHUTDOWN: {shutdown_reason} "
+                f"(Risk Level: {risk_level})"
+            )
+            self._prev_price = current_price
+            return None  # Grid shutdown, do not place orders
+        
+        if risk_level > 0:
+            print(
+                f"[{current_time}] Risk Level {risk_level} active "
+                f"(price: ${current_price:,.0f}, support: ${self.config.support:,.0f})"
+            )
+
         direction = triggered_order['direction']
         level_index = triggered_order['level_index']
         level_price = triggered_order['price']

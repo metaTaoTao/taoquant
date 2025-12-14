@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -119,6 +120,13 @@ class GridManager:
         #   'last_checked_bar': int  # Track which bar we last checked (to avoid duplicate triggers)
         # }
         self.pending_limit_orders: List[dict] = []
+        
+        # Risk state tracking for tiered risk management
+        self.grid_enabled: bool = True  # Grid enabled/disabled flag
+        self.risk_level: int = 0  # 0=normal, 1=mild, 2=moderate, 3=severe, 4=shutdown
+        self.risk_zone_entry_time: Optional[datetime] = None  # When entered risk zone
+        self.grid_shutdown_reason: Optional[str] = None  # Reason for grid shutdown
+        self.realized_pnl: float = 0.0  # Track realized profits for profit buffer
 
     def setup_grid(self, historical_data: pd.DataFrame) -> None:
         """
@@ -537,9 +545,19 @@ class GridManager:
                 skew_mult = max(0.0, 1.0 - self.config.inventory_skew_k * (inv_ratio / max(inv_ratio_threshold, 1e-9)))
                 base_size_btc = base_size_btc * skew_mult
 
-            # Market Maker Risk Zone: reduce BUY size significantly in risk zone
+            # Market Maker Risk Zone: tiered risk management
             if in_risk_zone:
-                mm_buy_mult = float(getattr(self.config, "mm_risk_buy_multiplier", 0.2))
+                # Apply risk level multipliers
+                if self.risk_level == 3:
+                    # Level 3: Severe risk
+                    mm_buy_mult = float(getattr(self.config, "mm_risk_level3_buy_mult", 0.05))
+                elif self.risk_level == 2:
+                    # Level 2: Moderate risk
+                    mm_buy_mult = float(getattr(self.config, "mm_risk_level2_buy_mult", 0.1))
+                else:
+                    # Level 1: Mild risk
+                    mm_buy_mult = float(getattr(self.config, "mm_risk_level1_buy_mult", 0.2))
+                
                 # Additional penalty if inventory is already high
                 if inv_ratio > float(getattr(self.config, "mm_risk_inventory_penalty", 0.5)):
                     mm_buy_mult = mm_buy_mult * 0.5  # Further reduce by 50%
@@ -688,9 +706,18 @@ class GridManager:
                 if vs >= float(getattr(self.config, "vol_trigger_score", 1.0)) and getattr(self.config, "vol_apply_to_sell", True):
                     base_size_btc = base_size_btc * float(self.config.vol_sell_mult_high)
             
-            # Market Maker Risk Zone: increase SELL size aggressively in risk zone
+            # Market Maker Risk Zone: tiered risk management for SELL
             if in_risk_zone:
-                mm_sell_mult = float(getattr(self.config, "mm_risk_sell_multiplier", 3.0))
+                # Apply risk level multipliers
+                if self.risk_level == 3:
+                    # Level 3: Severe risk
+                    mm_sell_mult = float(getattr(self.config, "mm_risk_level3_sell_mult", 5.0))
+                elif self.risk_level == 2:
+                    # Level 2: Moderate risk
+                    mm_sell_mult = float(getattr(self.config, "mm_risk_level2_sell_mult", 4.0))
+                else:
+                    # Level 1: Mild risk
+                    mm_sell_mult = float(getattr(self.config, "mm_risk_level1_sell_mult", 3.0))
                 base_size_btc = base_size_btc * mm_sell_mult
             
             base_size_btc = min(base_size_btc, max(0.0, float(holdings_btc)))
@@ -855,6 +882,105 @@ class GridManager:
         if level_key in self.filled_levels:
             del self.filled_levels[level_key]
 
+    def check_risk_level(
+        self,
+        current_price: float,
+        equity: float,
+        unrealized_pnl: float,
+        current_time: Optional[datetime] = None,
+    ) -> Tuple[int, bool, Optional[str]]:
+        """
+        Check current risk level and whether grid should be shut down.
+        
+        Returns:
+        -------
+        Tuple[int, bool, Optional[str]]
+            (risk_level, should_shutdown, shutdown_reason)
+            - risk_level: 0=normal, 1=mild, 2=moderate, 3=severe, 4=shutdown
+            - should_shutdown: True if grid should be disabled
+            - shutdown_reason: Reason for shutdown (if any)
+        """
+        if not getattr(self.config, "enable_mm_risk_zone", False):
+            return 0, False, None
+        
+        # Calculate risk zone thresholds
+        risk_zone_threshold = self.config.support + (self.current_atr * self.config.cushion_multiplier)
+        level3_threshold = self.config.support - (getattr(self.config, "mm_risk_level3_atr_mult", 2.0) * self.current_atr)
+        shutdown_price_threshold = self.config.support - (getattr(self.config, "max_risk_atr_mult", 3.0) * self.current_atr)
+        
+        # Calculate inventory risk
+        # Risk should be measured against max capacity (equity * leverage), not just equity
+        inventory_state = self.inventory_tracker.get_state()
+        inv_notional = abs(inventory_state.net_exposure) * current_price if current_price > 0 else 0.0
+        max_capacity = equity * self.config.leverage if equity > 0 else 1.0
+        inv_risk_pct = inv_notional / max_capacity if max_capacity > 0 else 999.0
+        
+        # Calculate profit buffer (if enabled)
+        profit_buffer = 0.0
+        if getattr(self.config, "enable_profit_buffer", True):
+            profit_buffer = self.realized_pnl * getattr(self.config, "profit_buffer_ratio", 0.5)
+        
+        # Adjust risk thresholds with profit buffer
+        max_loss_pct = getattr(self.config, "max_risk_loss_pct", 0.30)
+        adjusted_loss_threshold = max_loss_pct - (profit_buffer / equity) if equity > 0 else max_loss_pct
+        
+        # Determine risk level
+        risk_level = 0
+        should_shutdown = False
+        shutdown_reason = None
+        
+        if current_price < shutdown_price_threshold:
+            # Level 4: Extreme risk - shutdown
+            risk_level = 4
+            should_shutdown = True
+            shutdown_reason = f"Price below shutdown threshold (support - {getattr(self.config, 'max_risk_atr_mult', 3.0)} × ATR)"
+        elif unrealized_pnl < -adjusted_loss_threshold * equity:
+            # Level 4: Unrealized loss exceeds threshold (with profit buffer)
+            risk_level = 4
+            should_shutdown = True
+            shutdown_reason = f"Unrealized loss exceeds {max_loss_pct:.0%} equity (adjusted: {adjusted_loss_threshold:.0%} with profit buffer)"
+        elif inv_risk_pct > getattr(self.config, "max_risk_inventory_pct", 0.8):
+            # Level 4: Inventory risk too high
+            risk_level = 4
+            should_shutdown = True
+            shutdown_reason = f"Inventory risk exceeds {getattr(self.config, 'max_risk_inventory_pct', 0.8):.0%} capacity"
+        elif current_price < level3_threshold:
+            # Level 3: Severe risk
+            risk_level = 3
+        elif current_price < risk_zone_threshold:
+            # Level 1 or 2: Mild/Moderate risk
+            # Note: Level 2 would require time tracking, but user prefers manual control
+            # So we'll use Level 1 for now
+            risk_level = 1
+        else:
+            # Normal
+            risk_level = 0
+        
+        # Update risk state
+        self.risk_level = risk_level
+        if risk_level > 0 and self.risk_zone_entry_time is None:
+            self.risk_zone_entry_time = current_time if current_time else datetime.now()
+        elif risk_level == 0:
+            self.risk_zone_entry_time = None
+        
+        # Update grid enabled state
+        if should_shutdown and self.grid_enabled:
+            self.grid_enabled = False
+            self.grid_shutdown_reason = shutdown_reason
+        
+        return risk_level, should_shutdown, shutdown_reason
+    
+    def enable_grid(self) -> None:
+        """Manually re-enable grid after shutdown."""
+        self.grid_enabled = True
+        self.risk_level = 0
+        self.risk_zone_entry_time = None
+        self.grid_shutdown_reason = None
+    
+    def update_realized_pnl(self, pnl: float) -> None:
+        """Update realized PnL for profit buffer calculation."""
+        self.realized_pnl += pnl
+    
     def get_inventory_state(self) -> dict:
         """
         Get current inventory state.
@@ -872,4 +998,7 @@ class GridManager:
             "long_pct": state.long_pct,
             "short_pct": state.short_pct,
             "filled_levels_count": len(self.filled_levels),
+            "risk_level": self.risk_level,
+            "grid_enabled": self.grid_enabled,
+            "grid_shutdown_reason": self.grid_shutdown_reason,
         }
