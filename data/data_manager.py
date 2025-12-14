@@ -92,6 +92,81 @@ class DataManager:
 
         return data
 
+    def get_funding_rates(
+        self,
+        symbol: str,
+        start: Optional[datetime] = None,
+        end: Optional[datetime] = None,
+        source: str = "okx",
+        use_cache: bool = True,
+        allow_empty: bool = False,
+    ) -> pd.DataFrame:
+        """
+        Retrieve perpetual funding rate history (time series).
+
+        Architecture note:
+        Funding rate is a data-layer concern; strategies should consume the returned
+        time series (aligned/ffill to bar timestamps in orchestration/runner).
+
+        Parameters
+        ----------
+        symbol : str
+            Generic symbol, e.g. "BTCUSDT" or "BTC/USDT".
+        start, end : Optional[datetime]
+            UTC range to fetch (best effort; OKX pagination limitations apply).
+        source : str
+            Currently only "okx" is supported.
+        use_cache : bool
+            Whether to use parquet cache under data/cache.
+
+        Returns
+        -------
+        pd.DataFrame
+            Index: UTC timestamp
+            Columns: ["funding_rate"]
+        """
+        source = source.lower()
+        if source != "okx":
+            raise ValueError(f"Unsupported funding rate source: {source}")
+
+        cache_path = self._funding_cache_path(source, symbol)
+        request_start = DataManager._to_utc(start) if start else None
+        request_end = DataManager._to_utc(end) if end else None
+
+        if use_cache and cache_path.exists():
+            cached = pd.read_parquet(cache_path)
+            if not cached.empty:
+                cached["timestamp"] = pd.to_datetime(cached["timestamp"], utc=True)
+                cached = cached.set_index("timestamp").sort_index()
+                cache_start = cached.index.min()
+                cache_end = cached.index.max()
+                if (
+                    (request_start is None or cache_start <= request_start)
+                    and (request_end is None or cache_end >= request_end)
+                ):
+                    out = cached
+                    if request_start:
+                        out = out[out.index >= request_start]
+                    if request_end:
+                        out = out[out.index <= request_end]
+                    return out[["funding_rate"]]
+
+        df = self._fetch_okx_funding_rate_history(symbol=symbol, start=start, end=end)
+        if df.empty:
+            if allow_empty:
+                return df
+            raise ValueError(
+                "No funding rate data returned from OKX for the requested time range. "
+                "OKX public API often retains only a limited funding history window. "
+                "Consider using OKX historical data downloads or storing funding snapshots during live runs."
+            )
+
+        if self.cache_config.enabled:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            df.reset_index().rename(columns={"index": "timestamp"}).to_parquet(cache_path, index=False)
+
+        return df
+
     def _cache_path(self, source: str, symbol: str, timeframe: str) -> Path:
         """Return cache file path for given request."""
         safe_symbol = symbol.replace("/", "_").lower()
@@ -99,6 +174,98 @@ class DataManager:
         cache_dir.mkdir(parents=True, exist_ok=True)
         filename = f"{source}_{safe_symbol}_{timeframe}.parquet"
         return cache_dir / filename
+
+    def _funding_cache_path(self, source: str, symbol: str) -> Path:
+        """Return cache file path for funding rates."""
+        safe_symbol = symbol.replace("/", "_").replace("-", "_").lower()
+        cache_dir = self.cache_config.cache_dir
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        filename = f"{source}_{safe_symbol}_funding.parquet"
+        return cache_dir / filename
+
+    def _fetch_okx_funding_rate_history(
+        self,
+        symbol: str,
+        start: Optional[datetime],
+        end: Optional[datetime],
+    ) -> pd.DataFrame:
+        """
+        Fetch funding rate history from OKX REST API.
+
+        We try the historical endpoint first; if OKX changes the interface, we raise
+        a clear error with the payload to help debugging.
+        """
+        # OKX instrument id for USDT perpetual swap, e.g. BTC-USDT-SWAP
+        inst_id = self._format_okx_swap_instid(symbol)
+
+        base_url = self.config.data_sources["okx"].base_url or "https://www.okx.com"
+        session = requests.Session()
+
+        # OKX provides latest funding via /api/v5/public/funding-rate and history via
+        # /api/v5/public/funding-rate-history (documented in OKX API v5).
+        endpoint = "/api/v5/public/funding-rate-history"
+        params: Dict[str, Any] = {"instId": inst_id, "limit": 100}
+
+        # OKX pagination for this endpoint uses "after" to page backwards in time (older data).
+        # Empirically:
+        # - no params / after=now -> returns most recent records
+        # - before=now -> returns empty
+        # So we use "after" as the cursor and move it to older timestamps each loop.
+        if end:
+            params["after"] = int(self._to_utc(end).timestamp() * 1000)
+
+        start_ts = self._to_utc(start) if start else None
+        records: list[pd.DataFrame] = []
+        fetched = 0
+        max_records = 10000  # safety cap
+
+        while fetched < max_records:
+            resp = session.get(f"{base_url}{endpoint}", params=params, timeout=10)
+            if resp.status_code == 404:
+                raise RuntimeError(
+                    "OKX funding rate history endpoint not found (404). "
+                    "Please verify OKX API path for funding history."
+                )
+            resp.raise_for_status()
+            payload = resp.json()
+            if payload.get("code") != "0":
+                raise RuntimeError(f"OKX funding history error: {json.dumps(payload)}")
+
+            data = payload.get("data", [])
+            if not data:
+                break
+
+            # Expected fields include: fundingRate, fundingTime (ms)
+            df = pd.DataFrame(data)
+            if "fundingTime" not in df.columns or "fundingRate" not in df.columns:
+                raise RuntimeError(f"OKX funding history unexpected payload: {json.dumps(payload)[:2000]}")
+
+            df["timestamp"] = pd.to_datetime(df["fundingTime"].astype("int64"), unit="ms", utc=True)
+            df["funding_rate"] = pd.to_numeric(df["fundingRate"], errors="coerce")
+            df = df[["timestamp", "funding_rate"]].dropna()
+            df = df.drop_duplicates(subset=["timestamp"]).sort_values("timestamp")
+            df = df.set_index("timestamp")
+
+            records.append(df)
+            fetched += len(df)
+
+            oldest = df.index.min()
+            # page backwards: next "after" = oldest timestamp - 1ms
+            params["after"] = int(oldest.timestamp() * 1000) - 1
+
+            if start_ts is not None and oldest <= start_ts:
+                break
+
+        if not records:
+            return pd.DataFrame(columns=["funding_rate"])
+
+        out = pd.concat(records).sort_index()
+        out = out[~out.index.duplicated(keep="first")]
+        if start_ts is not None:
+            out = out[out.index >= start_ts]
+        if end:
+            out = out[out.index <= self._to_utc(end)]
+        return out
 
     def _store_cache(self, path: Path, data: pd.DataFrame) -> None:
         """Persist OHLCV data into parquet cache."""
@@ -320,6 +487,36 @@ class DataManager:
             base = upper[:-4]
             return f"{base}-USDT"
         return f"{upper}-USDT"
+
+    @staticmethod
+    def _format_okx_swap_instid(symbol: str) -> str:
+        """
+        Convert generic symbol to OKX USDT perpetual swap instrument id.
+
+        Examples:
+          - BTCUSDT -> BTC-USDT-SWAP
+          - BTC/USDT -> BTC-USDT-SWAP
+          - BTC-USDT -> BTC-USDT-SWAP
+          - BTC-USDT-SWAP -> BTC-USDT-SWAP
+        """
+        upper = symbol.upper()
+        if upper.endswith("-SWAP"):
+            return upper
+        if "-" in upper:
+            # BTC-USDT or BTC-USDT-SWAP already handled above
+            if upper.count("-") >= 1:
+                base_quote = upper
+                if base_quote.count("-") >= 2:
+                    # something like BTC-USDT-SWAP already
+                    return base_quote
+                return f"{base_quote}-SWAP"
+        if "/" in upper:
+            base, quote = upper.split("/")
+            return f"{base}-{quote}-SWAP"
+        if upper.endswith("USDT"):
+            base = upper[:-4]
+            return f"{base}-USDT-SWAP"
+        return f"{upper}-USDT-SWAP"
 
     @staticmethod
     def _to_utc(dt: datetime) -> pd.Timestamp:

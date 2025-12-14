@@ -40,6 +40,9 @@ class SimpleLeanRunner:
         timeframe: str,
         start_date: datetime,
         end_date: datetime,
+        output_dir: Path | None = None,
+        verbose: bool = True,
+        progress_every: int = 100,
     ):
         """Initialize runner with config."""
         self.config = config
@@ -47,6 +50,9 @@ class SimpleLeanRunner:
         self.timeframe = timeframe
         self.start_date = start_date
         self.end_date = end_date
+        self.output_dir = output_dir
+        self.verbose = verbose
+        self.progress_every = max(1, int(progress_every))
 
         self.algorithm = TaoGridLeanAlgorithm(config)
 
@@ -59,6 +65,7 @@ class SimpleLeanRunner:
         # Portfolio state
         self.cash = config.initial_cash
         self.holdings = 0.0  # BTC quantity
+        # Track margin-style leverage with negative cash allowed (simplified perp model)
         
         # Grid position tracking (FIFO queue for pairing)
         # Each entry: {'size': float, 'price': float, 'level': int, 'timestamp': datetime}
@@ -67,7 +74,8 @@ class SimpleLeanRunner:
 
     def load_data(self) -> pd.DataFrame:
         """Load historical data."""
-        print("Loading data...")
+        if self.verbose:
+            print("Loading data...")
         data_manager = DataManager()
 
         data = data_manager.get_klines(
@@ -78,21 +86,128 @@ class SimpleLeanRunner:
             source="okx",
         )
 
-        print(f"  Loaded {len(data)} bars from {data.index[0]} to {data.index[-1]}")
+        if self.verbose:
+            print(f"  Loaded {len(data)} bars from {data.index[0]} to {data.index[-1]}")
         return data
 
     def run(self) -> dict:
         """Run backtest."""
-        print("=" * 80)
-        print("TaoGrid Lean Backtest (Simplified Runner)")
-        print("=" * 80)
-        print()
+        if self.verbose:
+            print("=" * 80)
+            print("TaoGrid Lean Backtest (Simplified Runner)")
+            print("=" * 80)
+            print()
 
         # Load data
         data = self.load_data()
 
+        # Pre-compute factor columns (pure functions in analytics/)
+        # Used to improve risk-adjusted performance (Sharpe) by:
+        # - reducing buys in strong downtrends
+        # - sizing up only when mean-reversion signal is stronger
+        try:
+            from analytics.indicators.regime_factors import (
+                calculate_ema,
+                calculate_ema_slope,
+                rolling_zscore,
+                trend_score_from_slope,
+            )
+
+            ema = calculate_ema(data["close"], period=int(self.config.trend_ema_period))
+            slope = calculate_ema_slope(ema, lookback=int(self.config.trend_slope_lookback))
+            data["trend_score"] = trend_score_from_slope(slope, slope_ref=float(self.config.trend_slope_ref))
+            data["mr_z"] = rolling_zscore(data["close"], window=int(self.config.mr_z_lookback))
+        except Exception:
+            # Robust fallback: proceed without factors
+            data["trend_score"] = np.nan
+            data["mr_z"] = np.nan
+
+        # Breakout risk factor (range boundary risk-off)
+        try:
+            from analytics.indicators.volatility import calculate_atr
+            from analytics.indicators.breakout_risk import compute_breakout_risk
+            from analytics.indicators.range_factors import compute_range_position
+            from analytics.indicators.vol_regime import calculate_atr_pct, rolling_quantile_score
+
+            atr = calculate_atr(
+                data["high"],
+                data["low"],
+                data["close"],
+                period=int(self.config.atr_period),
+            )
+            br = compute_breakout_risk(
+                close=data["close"],
+                atr=atr,
+                support=float(self.config.support),
+                resistance=float(self.config.resistance),
+                trend_score=data.get("trend_score"),
+                band_atr_mult=float(getattr(self.config, "breakout_band_atr_mult", 1.5)),
+                band_pct=float(getattr(self.config, "breakout_band_pct", 0.003)),
+                trend_weight=float(getattr(self.config, "breakout_trend_weight", 0.7)),
+            )
+            data["breakout_risk_down"] = br["breakout_risk_down"]
+            data["breakout_risk_up"] = br["breakout_risk_up"]
+            data["range_pos"] = compute_range_position(
+                close=data["close"],
+                support=float(self.config.support),
+                resistance=float(self.config.resistance),
+            )
+
+            # Volatility regime score (0..1): higher => higher volatility
+            atr_pct = calculate_atr_pct(atr=atr, close=data["close"])
+            data["vol_score"] = rolling_quantile_score(
+                series=atr_pct,
+                lookback=int(getattr(self.config, "vol_lookback", 1440)),
+                low_q=float(getattr(self.config, "vol_low_q", 0.20)),
+                high_q=float(getattr(self.config, "vol_high_q", 0.80)),
+            )
+        except Exception:
+            data["breakout_risk_down"] = 0.0
+            data["breakout_risk_up"] = 0.0
+            data["range_pos"] = 0.5
+            data["vol_score"] = 0.0
+
+        # Funding rate (perp) factor: fetch from OKX public API and align to bar timestamps.
+        try:
+            dm = DataManager()
+            funding = dm.get_funding_rates(
+                symbol=self.symbol,
+                start=self.start_date,
+                end=self.end_date,
+                source="okx",
+                use_cache=True,
+                allow_empty=True,
+            )
+            if funding is None or funding.empty:
+                data["funding_rate"] = 0.0
+                data["minutes_to_funding"] = np.nan
+            else:
+                # Align to OHLCV timestamps by forward filling.
+                funding_aligned = funding.reindex(data.index, method="ffill").fillna(0.0)
+                data["funding_rate"] = funding_aligned["funding_rate"].astype(float)
+
+                # Compute minutes to next funding settlement time (fundingTime schedule).
+                funding_times = funding.index.sort_values()
+                # For each bar ts, find next funding_time >= ts using merge_asof(direction="forward")
+                ts_df = pd.DataFrame({"timestamp": data.index}).sort_values("timestamp")
+                ft_df = pd.DataFrame({"funding_time": funding_times})
+                merged = pd.merge_asof(
+                    ts_df,
+                    ft_df,
+                    left_on="timestamp",
+                    right_on="funding_time",
+                    direction="forward",
+                    allow_exact_matches=True,
+                )
+                mins = (merged["funding_time"] - merged["timestamp"]).dt.total_seconds() / 60.0
+                data["minutes_to_funding"] = mins.values
+        except Exception:
+            data["funding_rate"] = 0.0
+            data["minutes_to_funding"] = np.nan
+
         # Initialize algorithm with historical data
-        print("Initializing algorithm...")
+        if self.verbose:
+            print("Initializing algorithm...")
         historical_data = data.head(100)  # Use first 100 bars for ATR calc
         self.algorithm.initialize(
             symbol=self.symbol,
@@ -102,11 +217,12 @@ class SimpleLeanRunner:
         )
 
         # Run bar-by-bar
-        print("Running backtest...")
-        print()
+        if self.verbose:
+            print("Running backtest...")
+            print()
 
         for i, (timestamp, row) in enumerate(data.iterrows()):
-            if i % 100 == 0:
+            if self.verbose and i % self.progress_every == 0:
                 print(f"  Processing bar {i}/{len(data)} ({i/len(data)*100:.1f}%)", end="\r")
 
             # Set current bar index for limit order trigger checking
@@ -119,6 +235,15 @@ class SimpleLeanRunner:
                 'low': row['low'],
                 'close': row['close'],
                 'volume': row['volume'],
+                # Factor state (optional)
+                'trend_score': row.get('trend_score', np.nan),
+                'mr_z': row.get('mr_z', np.nan),
+                'breakout_risk_down': row.get('breakout_risk_down', 0.0),
+                'breakout_risk_up': row.get('breakout_risk_up', 0.0),
+                'range_pos': row.get('range_pos', 0.5),
+                'vol_score': row.get('vol_score', 0.0),
+                'funding_rate': row.get('funding_rate', 0.0),
+                'minutes_to_funding': row.get('minutes_to_funding', np.nan),
             }
 
             # Prepare portfolio state
@@ -134,7 +259,7 @@ class SimpleLeanRunner:
 
             # Execute orders (on_data returns order dict directly, or None)
             if order:
-                executed = self.execute_order(order, row['close'], timestamp)
+                executed = self.execute_order(order, bar_open=row['open'], market_price=row['close'], timestamp=timestamp)
 
                 # Update grid manager inventory if order was executed
                 if executed:
@@ -166,9 +291,10 @@ class SimpleLeanRunner:
                 'holdings_value': self.holdings * row['close'],
             })
 
-        print()
-        print("  Backtest completed!")
-        print()
+        if self.verbose:
+            print()
+            print("  Backtest completed!")
+            print()
 
         # Calculate metrics
         metrics = self.calculate_metrics()
@@ -180,7 +306,7 @@ class SimpleLeanRunner:
             'orders': pd.DataFrame(self.orders) if self.orders else pd.DataFrame(),
         }
 
-    def execute_order(self, order: dict, market_price: float, timestamp: datetime) -> bool:
+    def execute_order(self, order: dict, bar_open: float, market_price: float, timestamp: datetime) -> bool:
         """
         Execute an order with grid-level pairing (FIFO).
 
@@ -210,14 +336,22 @@ class SimpleLeanRunner:
         level = order.get('level', -1)  # Grid level index
         grid_level_price = order.get('price')  # Grid level price (trigger price)
         
-        # Use grid level price for execution (not market price)
-        # This ensures we respect grid spacing
-        execution_price = grid_level_price if grid_level_price else market_price
+        # Execution price for LIMIT orders on OHLC bars:
+        # - Buy limit: if bar opens below limit, you get filled at open (better); else at limit
+        # - Sell limit: if bar opens above limit, you get filled at open (better); else at limit
+        # This avoids unrealistic "overpay at limit even when market is far through the price".
+        if grid_level_price is None:
+            execution_price = market_price
+        else:
+            if direction == "buy":
+                execution_price = min(float(grid_level_price), float(bar_open))
+            else:
+                execution_price = max(float(grid_level_price), float(bar_open))
 
         # Apply commission
         # NOTE: For limit orders, slippage should be 0 (or very small)
         # Limit orders execute at the specified price, so no slippage
-        commission_rate = 0.001  # 0.1%
+        commission_rate = float(self.config.maker_fee)
         slippage_rate = 0.0  # 0% - limit orders execute at grid level price, no slippage
 
         if direction == 'buy':
@@ -227,7 +361,12 @@ class SimpleLeanRunner:
             slippage = cost * slippage_rate
             total_cost = cost + commission + slippage
 
-            if total_cost <= self.cash:
+            # Leverage / margin constraint (simplified):
+            # Allow cash to go negative, but constrain position notional by equity * leverage.
+            equity = self.cash + (self.holdings * market_price)
+            max_notional = equity * float(self.config.leverage)
+            new_notional = abs(self.holdings + size) * market_price
+            if equity > 0 and new_notional <= max_notional:
                 self.cash -= total_cost
                 self.holdings += size
 
@@ -250,6 +389,14 @@ class SimpleLeanRunner:
                     'cost': total_cost,
                     'commission': commission,
                     'slippage': slippage,
+                    # factor diagnostics
+                    'mr_z': float(order.get('mr_z')) if order.get('mr_z') is not None else np.nan,
+                    'trend_score': float(order.get('trend_score')) if order.get('trend_score') is not None else np.nan,
+                    'breakout_risk_down': float(order.get('breakout_risk_down')) if order.get('breakout_risk_down') is not None else np.nan,
+                    'breakout_risk_up': float(order.get('breakout_risk_up')) if order.get('breakout_risk_up') is not None else np.nan,
+                    'range_pos': float(order.get('range_pos')) if order.get('range_pos') is not None else np.nan,
+                    'funding_rate': float(order.get('funding_rate')) if order.get('funding_rate') is not None else np.nan,
+                    'vol_score': float(order.get('vol_score')) if order.get('vol_score') is not None else np.nan,
                 })
 
                 return True  # Order executed
@@ -342,6 +489,14 @@ class SimpleLeanRunner:
                     'commission': commission,
                     'slippage': slippage,
                     'matched_trades': len(matched_trades),
+                    # factor diagnostics
+                    'mr_z': float(order.get('mr_z')) if order.get('mr_z') is not None else np.nan,
+                    'trend_score': float(order.get('trend_score')) if order.get('trend_score') is not None else np.nan,
+                    'breakout_risk_down': float(order.get('breakout_risk_down')) if order.get('breakout_risk_down') is not None else np.nan,
+                    'breakout_risk_up': float(order.get('breakout_risk_up')) if order.get('breakout_risk_up') is not None else np.nan,
+                    'range_pos': float(order.get('range_pos')) if order.get('range_pos') is not None else np.nan,
+                    'funding_rate': float(order.get('funding_rate')) if order.get('funding_rate') is not None else np.nan,
+                    'vol_score': float(order.get('vol_score')) if order.get('vol_score') is not None else np.nan,
                 })
 
                 return True  # Order executed
@@ -362,14 +517,28 @@ class SimpleLeanRunner:
         drawdown = (equity_df['equity'] - cummax) / cummax
         max_drawdown = drawdown.min()
 
-        # Returns
-        returns = equity_df['equity'].pct_change().dropna()
-        sharpe = returns.mean() / returns.std() * np.sqrt(252) if returns.std() > 0 else 0
+        # Traditional Sharpe/Sortino: annualized using DAILY returns.
+        # This avoids distortions from minute-level microstructure noise and incorrect scaling.
+        annual_days = int(getattr(self.config, "sharpe_annualization_days", 365))
 
-        # Downside deviation
-        negative_returns = returns[returns < 0]
-        downside_std = negative_returns.std() if len(negative_returns) > 0 else returns.std()
-        sortino = returns.mean() / downside_std * np.sqrt(252) if downside_std > 0 else 0
+        equity_ts = equity_df.copy()
+        equity_ts["timestamp"] = pd.to_datetime(equity_ts["timestamp"], utc=True)
+        equity_ts = equity_ts.set_index("timestamp").sort_index()
+
+        daily_equity = equity_ts["equity"].resample("1D").last().dropna()
+        daily_returns = daily_equity.pct_change().dropna()
+
+        if daily_returns.std() > 0:
+            sharpe = float(daily_returns.mean() / daily_returns.std() * np.sqrt(annual_days))
+        else:
+            sharpe = 0.0
+
+        negative_daily = daily_returns[daily_returns < 0]
+        downside_std = float(negative_daily.std()) if len(negative_daily) > 0 else float(daily_returns.std())
+        if downside_std > 0:
+            sortino = float(daily_returns.mean() / downside_std * np.sqrt(annual_days))
+        else:
+            sortino = 0.0
 
         # Trade statistics
         if not trades_df.empty:
@@ -408,6 +577,7 @@ class SimpleLeanRunner:
             'max_drawdown': max_drawdown,
             'sharpe_ratio': sharpe,
             'sortino_ratio': sortino,
+            'sharpe_annualization_days': annual_days,
             'total_trades': total_trades,
             'winning_trades': winning_trades,
             'losing_trades': losing_trades,
@@ -458,17 +628,18 @@ class SimpleLeanRunner:
         
         trades_df.to_csv(output_dir / "trades.csv", index=False)
         
-        if trades_df.empty:
-            print(f"  Warning: No trades recorded. This may indicate:")
-            print(f"    - Grid pairing logic issue")
-            print(f"    - No buy/sell matches occurred")
-            print(f"    - Need to re-run backtest with fixed logic")
+        if trades_df.empty and self.verbose:
+            print("  Warning: No trades recorded. This may indicate:")
+            print("    - Grid pairing logic issue")
+            print("    - No buy/sell matches occurred")
+            print("    - Need to re-run backtest with fixed logic")
 
         # Save orders
         if not results['orders'].empty:
             results['orders'].to_csv(output_dir / "orders.csv", index=False)
 
-        print(f"Results saved to: {output_dir}")
+        if self.verbose:
+            print(f"Results saved to: {output_dir}")
 
     def print_summary(self, results: dict):
         """Print results summary."""
@@ -508,49 +679,55 @@ class SimpleLeanRunner:
 def main():
     """Main entry point."""
     # Create configuration
+    # Objective: Maximize ROE (per user preference) under 5x leverage and 20% max DD tolerance.
     config = TaoGridLeanConfig(
-        name="TaoGrid Optimized - Traditional Grid",
-        description="Traditional grid with free sell + optimized parameters",
+        name="TaoGrid Optimized - Max ROE (Perp)",
+        description="Inventory-aware grid (perp maker fee 0.02%), focus on max ROE",
 
-        # ========== S/R Levels (Based on actual price range) ==========
-        # Historical price analysis (2025-07-10 to 2025-08-10):
-        # Price range: ~$115k - $120k (5k range)
-        # Main action: $116k - $118k (2k range)
-        support=115000.0,   # Set below actual low for safety margin
-        resistance=120000.0,  # Set above actual high for safety margin
+        # ========== S/R Levels ==========
+        support=111000.0,
+        resistance=123000.0,
         regime="NEUTRAL_RANGE",
 
-        # ========== Grid Parameters (Optimized for Turnover) ==========
-        # Goal: Maximize turnover while maintaining profitability
-        # Formula: spacing = (min_return + 2×fee) × spacing_multiplier
-        #
-        # Analysis:
-        # - min_return = 0.5%
-        # - trading_costs = 0.2% (2 × 0.1% maker_fee, slippage=0 for limit orders)
-        # - base_spacing = 0.7%
-        # - spacing_multiplier = 1.0 → final spacing = 0.7%
-        #
-        # In $5k range with 0.7% spacing:
-        # - Max layers possible = $5k / ($117k × 0.7%) ≈ 6 layers
-        # - We'll request 10 layers, system will generate what fits
-        grid_layers_buy=10,
-        grid_layers_sell=10,
-        weight_k=0.5,
+        # ========== Grid Parameters ==========
+        # With perp maker fee=0.02% (2x round trip = 0.04%), we can use thinner min_return.
+        # Start from a high-ROE sweep winner:
+        # - min_return = 0.12% (net)
+        # - trading_costs = 0.04% (2 × 0.02% maker_fee, slippage=0)
+        # - base_spacing = 0.16%
+        # - grid_layers = 40 (denser grid)
+        grid_layers_buy=40,
+        grid_layers_sell=40,
+        weight_k=0.0,  # more uniform sizing (less edge-heavy) to improve ROE in mid-range churn
+        spacing_multiplier=1.0,
+        min_return=0.0012,
+        maker_fee=0.0002,
+        inventory_skew_k=0.5,
+        inventory_capacity_threshold_pct=1.0,
+        # Disable MR+Trend factor for now: it behaved like heavy risk-control and reduced Sharpe
+        # in ablation. We keep only breakout risk-off (Option 1).
+        enable_mr_trend_factor=False,
+        # Breakout risk factor (aggressive sweep winner, Sharpe-ranked, MaxDD<=20%):
+        enable_breakout_risk_factor=True,
+        breakout_band_atr_mult=1.0,
+        breakout_band_pct=0.008,
+        breakout_trend_weight=0.7,
+        breakout_buy_k=2.0,
+        breakout_buy_floor=0.5,
+        breakout_block_threshold=0.9,
+        # Range position asymmetry v2 (top-band only) - sweep winner:
+        enable_range_pos_asymmetry_v2=True,
+        range_top_band_start=0.45,
+        range_buy_k=0.2,
+        range_buy_floor=0.2,
+        range_sell_k=1.5,
+        range_sell_cap=1.5,
 
-        # CRITICAL: spacing_multiplier >= 1.0 (now enforced by validation)
-        spacing_multiplier=1.0,  # Use standard spacing (no expansion)
-        min_return=0.005,  # 0.5% - net profit target per trade
-        # Expected final spacing: 0.7% (base) × 1.0 = 0.7%
-        # Net profit per trade: 0.7% - 0.2% (costs) = 0.5% ✓
-
-        # Risk parameters - Traditional grid allocation
-        # Grid strategies work best with higher capital allocation
-        risk_budget_pct=0.6,      # 60% of capital in grid (increased from 30%)
-        enable_throttling=False,  # Disable for traditional grid (maximize turnover)
-
-        # Backtest parameters
+        # ========== Risk / Execution ==========
+        risk_budget_pct=1.0,
+        enable_throttling=True,
         initial_cash=100000.0,
-        leverage=1.0,  # Start with 1x, can increase later
+        leverage=50.0,
     )
 
     # Run backtest
@@ -567,14 +744,15 @@ def main():
     runner.print_summary(results)
 
     # Save results
-    output_dir = Path("run/results_lean_taogrid")
+    output_dir = runner.output_dir or Path("run/results_lean_taogrid")
     runner.save_results(results, output_dir)
 
-    print()
-    print("Next steps:")
-    print("1. Review metrics in: run/results_lean_taogrid/metrics.json")
-    print("2. Analyze trades in: run/results_lean_taogrid/trades.csv")
-    print("3. Plot equity curve from: run/results_lean_taogrid/equity_curve.csv")
+    if runner.verbose:
+        print()
+        print("Next steps:")
+        print(f"1. Review metrics in: {output_dir}/metrics.json")
+        print(f"2. Analyze trades in: {output_dir}/trades.csv")
+        print(f"3. Plot equity curve from: {output_dir}/equity_curve.csv")
 
 
 if __name__ == "__main__":

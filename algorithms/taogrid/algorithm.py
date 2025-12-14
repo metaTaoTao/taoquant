@@ -204,9 +204,18 @@ class TaoGridLeanAlgorithm:
         direction = triggered_order['direction']
         level_index = triggered_order['level_index']
         level_price = triggered_order['price']
+        mr_z = bar_data.get("mr_z")
+        trend_score = bar_data.get("trend_score")
+        breakout_risk_down = bar_data.get("breakout_risk_down")
+        breakout_risk_up = bar_data.get("breakout_risk_up")
+        range_pos = bar_data.get("range_pos")
+        funding_rate = bar_data.get("funding_rate")
+        minutes_to_funding = bar_data.get("minutes_to_funding")
+        vol_score = bar_data.get("vol_score")
 
         # Calculate order size with throttling
         equity = portfolio_state.get("equity", self.config.initial_cash)
+        holdings_btc = portfolio_state.get("holdings", 0.0)
         size, throttle_status = self.grid_manager.calculate_order_size(
             direction=direction,
             level_index=level_index,
@@ -214,6 +223,16 @@ class TaoGridLeanAlgorithm:
             equity=equity,
             daily_pnl=self.daily_pnl,
             risk_budget=self.risk_budget,
+            holdings_btc=holdings_btc,
+            current_price=current_price,  # Pass current price for MM risk zone detection
+            mr_z=mr_z,
+            trend_score=trend_score,
+            breakout_risk_down=breakout_risk_down,
+            breakout_risk_up=breakout_risk_up,
+            range_pos=range_pos,
+            funding_rate=funding_rate,
+            minutes_to_funding=minutes_to_funding,
+            vol_score=vol_score,
         )
 
         # Check if order should be placed
@@ -258,6 +277,15 @@ class TaoGridLeanAlgorithm:
             "level": level_index,
             "reason": throttle_status.reason,
             "timestamp": current_time,
+            # Factor state for diagnostics (optional)
+            "mr_z": mr_z,
+            "trend_score": trend_score,
+            "breakout_risk_down": breakout_risk_down,
+            "breakout_risk_up": breakout_risk_up,
+            "range_pos": range_pos,
+            "funding_rate": funding_rate,
+            "minutes_to_funding": minutes_to_funding,
+            "vol_score": vol_score,
         }
         
         # Save current price for next bar (for cross detection)
@@ -299,24 +327,12 @@ class TaoGridLeanAlgorithm:
                 target_sell_price = self.grid_manager.sell_levels[target_sell_level]
                 self.grid_manager.place_pending_order('sell', target_sell_level, target_sell_price)
                 print(f"  Placed sell limit order at L{target_sell_level+1} @ ${target_sell_price:,.0f}")
-            # IMPORTANT: Re-place buy limit order immediately (grid strategy: continuous orders)
-            # Don't wait for sell - keep buying at this level as long as price is in range
-            # Reset filled_levels to allow immediate re-entry
-            buy_level_key = f"buy_L{level + 1}"
-            if buy_level_key in self.grid_manager.filled_levels:
-                del self.grid_manager.filled_levels[buy_level_key]
-            # Re-place buy limit order at same level
-            if self.grid_manager.buy_levels is not None and level < len(self.grid_manager.buy_levels):
-                buy_level_price = self.grid_manager.buy_levels[level]
-                self.grid_manager.place_pending_order('buy', level, buy_level_price)
-                print(f"  Re-placed buy limit order at L{level+1} @ ${buy_level_price:,.0f} (continuous grid)")
+            # IMPORTANT (inventory-aware grid):
+            # Do NOT immediately re-place the same buy order after a buy fill.
+            # We wait until the corresponding sell is filled, then re-enter.
         elif direction == "sell":
             # Remove filled sell limit order
             self.grid_manager.remove_pending_order('sell', level)
-            # Reset filled level to allow re-entry (grid strategy: sell -> buy again)
-            buy_level_key = f"buy_L{level + 1}"
-            if buy_level_key in self.grid_manager.filled_levels:
-                del self.grid_manager.filled_levels[buy_level_key]
             # Place new buy limit order at the same buy level (re-entry for grid strategy)
             # Find which buy level corresponds to this sell level
             # Since sell[i] is paired with buy[i], we place buy order at buy[i]

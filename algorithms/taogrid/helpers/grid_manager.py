@@ -266,8 +266,9 @@ class GridManager:
         Check if any pending limit order is triggered by price movement.
         
         Limit order trigger logic (grid strategy):
-        - Buy limit order: triggers when bar_low <= limit_price (price touches or crosses limit)
-        - Sell limit order: triggers when bar_high >= limit_price (price touches or crosses limit)
+        - A limit order can only fill if the bar's traded range *actually touches* the limit price.
+          For OHLC bars, that means: bar_low <= limit_price <= bar_high.
+        - Buy/Sell share the same "touch" condition; direction only affects inventory constraints.
         
         We check if price touches the limit price (not requiring a "cross").
         This is correct for grid strategy: if price reaches the limit, the order should fill.
@@ -314,14 +315,18 @@ class GridManager:
             # Check if limit order is triggered
             triggered = False
             
+            # Core "touch" condition (OHLC-consistent)
+            if bar_low is not None and bar_high is not None:
+                touched = (bar_low <= limit_price <= bar_high)
+            else:
+                # Fallback when high/low are missing: approximate using current price
+                touched = (current_price == limit_price) or (
+                    (current_price <= limit_price) if direction == 'buy' else (current_price >= limit_price)
+                )
+
             if direction == 'buy':
-                # Buy limit: triggers when bar_low <= limit_price
-                # Grid strategy: if price touches or goes below limit, order fills
-                if bar_low is not None:
-                    triggered = bar_low <= limit_price
-                else:
-                    # Fallback: use current price
-                    triggered = current_price <= limit_price
+                # Buy limit: only fills if bar range touches the limit price
+                triggered = touched
                 
                 # Also check if level is already filled
                 level_key = f"buy_L{level_index + 1}"
@@ -329,13 +334,8 @@ class GridManager:
                     triggered = False
                     
             elif direction == 'sell':
-                # Sell limit: triggers when bar_high >= limit_price
-                # Grid strategy: if price touches or goes above limit, order fills
-                if bar_high is not None:
-                    triggered = bar_high >= limit_price
-                else:
-                    # Fallback: use current price
-                    triggered = current_price >= limit_price
+                # Sell limit: only fills if bar range touches the limit price
+                triggered = touched
 
                 # Traditional Grid: FREE SELL (not forced pairing)
                 # Sell whenever we have long positions AND price reaches sell level
@@ -443,6 +443,16 @@ class GridManager:
         equity: float,
         daily_pnl: float,
         risk_budget: float,
+        holdings_btc: float,
+        current_price: float | None = None,
+        mr_z: float | None = None,
+        trend_score: float | None = None,
+        breakout_risk_down: float | None = None,
+        breakout_risk_up: float | None = None,
+        range_pos: float | None = None,
+        funding_rate: float | None = None,
+        minutes_to_funding: float | None = None,
+        vol_score: float | None = None,
     ) -> float:
         """
         Calculate position size for a grid order.
@@ -494,9 +504,199 @@ class GridManager:
         # Apply leverage (if > 1.0)
         base_size_btc = base_size_btc * self.config.leverage
 
+        # Market Maker Risk Zone (MM Risk Mode)
+        # When price breaks below support + volatility buffer, enter risk mode:
+        # - Reduce BUY size significantly (small positions to catch falling knife)
+        # - Increase SELL size aggressively (de-inventory, sell most holdings)
+        # This mimics market maker behavior: widen spread, reduce inventory risk
+        in_risk_zone = False
+        if getattr(self.config, "enable_mm_risk_zone", False) and current_price is not None:
+            # Risk zone threshold: support + cushion (volatility buffer)
+            risk_zone_threshold = self.config.support + (self.current_atr * self.config.cushion_multiplier)
+            if current_price < risk_zone_threshold:
+                in_risk_zone = True
+
+        # Inventory-aware skew (institutional-style inventory control)
+        # - If inventory is too high, block new BUYs (de-risk).
+        # - Otherwise, progressively reduce BUY size as inventory rises.
+        inventory_state = self.inventory_tracker.get_state()
+        # Notional inventory ratio (more relevant for perp/leverage than raw BTC units):
+        # inv_ratio = |position_notional| / equity
+        inv_ratio = (abs(float(holdings_btc)) * float(level_price) / float(equity)) if equity > 0 else 999.0
+        inv_ratio_threshold = float(self.config.inventory_capacity_threshold_pct) * float(self.config.leverage)
+        if direction == "buy":
+            if inv_ratio >= inv_ratio_threshold:
+                from risk_management.grid_risk_manager import ThrottleStatus
+                return 0.0, ThrottleStatus(
+                    size_multiplier=0.0,
+                    reason="Inventory de-risk (notional_ratio>=capacity_threshold)",
+                )
+            if self.config.inventory_skew_k > 0:
+                # Scale buy size down as inventory ratio rises toward capacity.
+                # inventory_skew_k controls how aggressive the reduction is.
+                skew_mult = max(0.0, 1.0 - self.config.inventory_skew_k * (inv_ratio / max(inv_ratio_threshold, 1e-9)))
+                base_size_btc = base_size_btc * skew_mult
+
+            # Market Maker Risk Zone: reduce BUY size significantly in risk zone
+            if in_risk_zone:
+                mm_buy_mult = float(getattr(self.config, "mm_risk_buy_multiplier", 0.2))
+                # Additional penalty if inventory is already high
+                if inv_ratio > float(getattr(self.config, "mm_risk_inventory_penalty", 0.5)):
+                    mm_buy_mult = mm_buy_mult * 0.5  # Further reduce by 50%
+                base_size_btc = base_size_btc * mm_buy_mult
+
+            # MR + Trend factor filter (Sharpe-oriented)
+            # Idea:
+            # - In strong downtrends, block new buys (avoid inventory accumulation / left tail).
+            # - Otherwise, scale buy size by:
+            #   - MR strength (more oversold -> larger size)
+            #   - Trend state (more negative -> smaller size)
+            if getattr(self.config, "enable_mr_trend_factor", False):
+                from risk_management.grid_risk_manager import ThrottleStatus
+
+                ts = float(trend_score) if trend_score is not None and np.isfinite(trend_score) else 0.0
+                z_is_valid = mr_z is not None and np.isfinite(mr_z)
+                z = float(mr_z) if z_is_valid else 0.0
+
+                # Hard block for strong downtrend
+                if ts <= -float(self.config.trend_block_threshold):
+                    return 0.0, ThrottleStatus(
+                        size_multiplier=0.0,
+                        reason="Factor block (strong downtrend)",
+                    )
+
+                # Trend multiplier: only reduce when ts < 0
+                neg_ts = max(0.0, -ts)
+                trend_mult = max(
+                    float(self.config.trend_buy_floor),
+                    1.0 - float(self.config.trend_buy_k) * neg_ts,
+                )
+
+                # MR multiplier (optional):
+                # Default config sets mr_min_mult=1.0, making MR a diagnostics-only feature.
+                # If user later sets mr_min_mult < 1.0, this becomes a gentle "buy less when not oversold".
+                if not z_is_valid:
+                    mr_mult = 1.0
+                elif z >= 0:
+                    mr_mult = float(self.config.mr_min_mult)
+                else:
+                    mr_strength = min(1.0, max(0.0, (-z) / float(self.config.mr_z_ref)))
+                    mr_mult = max(float(self.config.mr_min_mult), mr_strength)
+
+                factor_mult = trend_mult * mr_mult
+                base_size_btc = base_size_btc * factor_mult
+
+            # Breakout risk factor (near boundary risk-off)
+            if getattr(self.config, "enable_breakout_risk_factor", False):
+                from risk_management.grid_risk_manager import ThrottleStatus
+
+                br_down = float(breakout_risk_down) if breakout_risk_down is not None and np.isfinite(breakout_risk_down) else 0.0
+                br_up = float(breakout_risk_up) if breakout_risk_up is not None and np.isfinite(breakout_risk_up) else 0.0
+
+                # For a long-inventory grid, downside breakout is the main tail risk.
+                # Still keep upside risk for diagnostics / future use.
+                if br_down >= float(self.config.breakout_block_threshold):
+                    return 0.0, ThrottleStatus(
+                        size_multiplier=0.0,
+                        reason="Breakout risk-off (downside)",
+                    )
+
+                # Reduce buys as downside risk rises; keep a floor to preserve churn.
+                risk_mult = max(
+                    float(self.config.breakout_buy_floor),
+                    1.0 - float(self.config.breakout_buy_k) * br_down,
+                )
+                base_size_btc = base_size_btc * risk_mult
+
+            # Funding factor (perp cost control)
+            if getattr(self.config, "enable_funding_factor", False):
+                from risk_management.grid_risk_manager import ThrottleStatus
+
+                fr = float(funding_rate) if funding_rate is not None and np.isfinite(funding_rate) else 0.0
+                # Time gate: only apply around funding settlement windows to avoid reducing churn.
+                if getattr(self.config, "enable_funding_time_gate", True):
+                    mtf = float(minutes_to_funding) if minutes_to_funding is not None and np.isfinite(minutes_to_funding) else 999999.0
+                    if abs(mtf) > float(self.config.funding_gate_minutes):
+                        fr = 0.0
+
+                if getattr(self.config, "funding_apply_to_buy", False):
+                    if fr >= float(self.config.funding_block_threshold):
+                        return 0.0, ThrottleStatus(
+                            size_multiplier=0.0,
+                            reason="Funding risk-off (block BUY)",
+                        )
+                    if fr > 0:
+                        # normalize to [0, 1] using funding_ref
+                        x = min(1.0, max(0.0, fr / float(self.config.funding_ref)))
+                        buy_mult = max(float(self.config.funding_buy_floor), 1.0 - float(self.config.funding_buy_k) * x)
+                        base_size_btc = base_size_btc * buy_mult
+
+            # Range position asymmetry v2 (TOP band only)
+            if getattr(self.config, "enable_range_pos_asymmetry_v2", False):
+                rp = float(range_pos) if range_pos is not None and np.isfinite(range_pos) else 0.5
+                rp = min(1.0, max(0.0, rp))
+                start = float(self.config.range_top_band_start)
+                if rp >= start:
+                    x = (rp - start) / max(1e-9, (1.0 - start))  # 0..1 within band
+                    buy_mult = max(float(self.config.range_buy_floor), 1.0 - float(self.config.range_buy_k) * x)
+                    base_size_btc = base_size_btc * buy_mult
+
+            # Volatility regime factor (v2):
+            # Only act in extreme high-volatility, and prefer SELL-only de-risking to
+            # avoid killing churn / Sharpe.
+            if getattr(self.config, "enable_vol_regime_factor", False):
+                vs = float(vol_score) if vol_score is not None and np.isfinite(vol_score) else 0.0
+                if vs >= float(getattr(self.config, "vol_trigger_score", 1.0)) and getattr(self.config, "vol_apply_to_buy", False):
+                    # Optional: if enabled, reduce BUY risk in extreme high vol
+                    base_size_btc = base_size_btc * 1.0  # no-op by default
+
+            # NOTE:
+            # We experimented with a naive range-position asymmetry and found it can
+            # dramatically reduce churn and harm Sharpe. The v2 implementation (enabled
+            # via enable_range_pos_asymmetry_v2) should be applied ONLY near the range top
+            # to de-inventory without suppressing mid-range trading.
+        else:
+            # Selling is used to close long inventory in this strategy.
+            # Cap sell size to available holdings to avoid failed executions.
+            rp = float(range_pos) if range_pos is not None and np.isfinite(range_pos) else 0.5
+            rp = min(1.0, max(0.0, rp))
+
+            # Funding factor: boost sell aggressiveness when funding positive (longs pay).
+            if getattr(self.config, "enable_funding_factor", False) and getattr(self.config, "funding_apply_to_sell", True):
+                fr = float(funding_rate) if funding_rate is not None and np.isfinite(funding_rate) else 0.0
+                if getattr(self.config, "enable_funding_time_gate", True):
+                    mtf = float(minutes_to_funding) if minutes_to_funding is not None and np.isfinite(minutes_to_funding) else 999999.0
+                    if abs(mtf) > float(self.config.funding_gate_minutes):
+                        fr = 0.0
+                if fr > 0:
+                    x = min(1.0, max(0.0, fr / float(self.config.funding_ref)))
+                    sell_mult = min(float(self.config.funding_sell_cap), 1.0 + float(self.config.funding_sell_k) * x)
+                    base_size_btc = base_size_btc * sell_mult
+
+            if getattr(self.config, "enable_range_pos_asymmetry_v2", False):
+                # v2: ONLY apply near top band, to avoid killing churn.
+                start = float(self.config.range_top_band_start)
+                if rp >= start:
+                    # normalize to [0, 1] within band
+                    x = (rp - start) / max(1e-9, (1.0 - start))
+                    sell_mult = min(float(self.config.range_sell_cap), 1.0 + float(self.config.range_sell_k) * x)
+                    base_size_btc = base_size_btc * sell_mult
+
+            # Volatility regime factor: in high vol, prioritize de-risking via SELL
+            if getattr(self.config, "enable_vol_regime_factor", False):
+                vs = float(vol_score) if vol_score is not None and np.isfinite(vol_score) else 0.0
+                if vs >= float(getattr(self.config, "vol_trigger_score", 1.0)) and getattr(self.config, "vol_apply_to_sell", True):
+                    base_size_btc = base_size_btc * float(self.config.vol_sell_mult_high)
+            
+            # Market Maker Risk Zone: increase SELL size aggressively in risk zone
+            if in_risk_zone:
+                mm_sell_mult = float(getattr(self.config, "mm_risk_sell_multiplier", 3.0))
+                base_size_btc = base_size_btc * mm_sell_mult
+            
+            base_size_btc = min(base_size_btc, max(0.0, float(holdings_btc)))
+
         # Apply throttling if enabled
         if self.config.enable_throttling:
-            inventory_state = self.inventory_tracker.get_state()
             throttle_status = self.risk_manager.check_throttle(
                 long_exposure=inventory_state.long_exposure,
                 short_exposure=inventory_state.short_exposure,
@@ -626,13 +826,16 @@ class GridManager:
         level_key = f"{direction}_L{level_index + 1}"
 
         # Update inventory tracker
+        # NOTE: This Lean grid implementation is long-only at the position layer:
+        # - BUY increases long exposure
+        # - SELL reduces long exposure (it is NOT opening a short position)
         if direction == "buy":
             self.inventory_tracker.update(
                 long_size=size, grid_level=level_key
             )
         else:
             self.inventory_tracker.update(
-                short_size=size, grid_level=level_key
+                long_size=-size, grid_level=level_key
             )
 
     def reset_filled_level(self, direction: str, level_index: int) -> None:

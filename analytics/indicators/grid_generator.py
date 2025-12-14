@@ -33,7 +33,7 @@ import pandas as pd
 def calculate_grid_spacing(
     atr: pd.Series,
     min_return: float = 0.005,
-    maker_fee: float = 0.001,
+    maker_fee: float = 0.0002,
     slippage: float = 0.0,  # Changed default to 0.0 for limit orders
     volatility_k: float = 0.6,
     use_limit_orders: bool = True,  # New parameter: whether using limit orders
@@ -47,7 +47,7 @@ def calculate_grid_spacing(
     Where:
         - min_return: minimum NET return per grid AFTER all costs (default 0.5%)
           This is the profit you want AFTER paying fees and slippage
-        - maker_fee: exchange maker fee per side (default 0.1%, so 2× = 0.2% total)
+        - maker_fee: exchange maker fee per side (default 0.02%, so 2× = 0.04% total)
         - slippage: slippage per side (default 0.0% for limit orders)
           NOTE: For limit orders, slippage should be 0 as orders execute at limit price
           Only use slippage > 0 for market orders
