@@ -365,6 +365,7 @@ class VectorBTEngine(BacktestEngine):
                 fees=config.commission,
                 slippage=config.slippage,
                 freq='min',
+                accumulate=True,  # Allow position accumulation (for grid strategies)
             )
         elif has_long and not has_short:
             # Long-only
@@ -379,6 +380,7 @@ class VectorBTEngine(BacktestEngine):
                 fees=config.commission,
                 slippage=config.slippage,
                 freq='min',
+                accumulate=True,  # Allow position accumulation (for grid strategies)
             )
         else:
             # Mixed - not supported in this VectorBT version
