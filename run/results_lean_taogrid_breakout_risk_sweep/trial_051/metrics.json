@@ -1,0 +1,18 @@
+{
+  "total_return": 0.5701531967634266,
+  "total_pnl": 57015.31967634265,
+  "max_drawdown": -0.18463456195150335,
+  "sharpe_ratio": 5.2016701872654245,
+  "sortino_ratio": 12.000571323092172,
+  "sharpe_annualization_days": 365,
+  "total_trades": 306,
+  "winning_trades": 306.0,
+  "losing_trades": 0.0,
+  "win_rate": 1.0,
+  "avg_win": 89.29989159736066,
+  "avg_loss": 0,
+  "profit_factor": 0,
+  "final_equity": 157015.31967634265,
+  "avg_holding_period_hours": 1.9101851851851852,
+  "avg_return_per_trade": 0.0012518961849129517
+}

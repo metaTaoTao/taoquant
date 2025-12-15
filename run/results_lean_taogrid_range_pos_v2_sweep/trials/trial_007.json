@@ -1,0 +1,15 @@
+{
+  "trial": 7,
+  "range_top_band_start": 0.45,
+  "range_buy_k": 1.6,
+  "range_buy_floor": 0.4,
+  "range_sell_k": 2.0,
+  "range_sell_cap": 1.2,
+  "sharpe_ratio": 5.539812184759229,
+  "sortino_ratio": 10.8333863840432,
+  "max_drawdown": -0.18826682304106213,
+  "total_return": 0.5886061862820142,
+  "total_trades": 329.0,
+  "avg_holding_period_hours": 6.888196555217833,
+  "output_dir": "run\\results_lean_taogrid_range_pos_v2_sweep\\trial_007"
+}

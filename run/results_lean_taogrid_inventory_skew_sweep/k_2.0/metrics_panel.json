@@ -1,0 +1,46 @@
+{
+  "summary": {
+    "total_return": 0.01599142873082921,
+    "total_pnl": 1599.1428730829211,
+    "max_drawdown": -0.009269233384505565,
+    "sharpe_ratio": 0.09185281271532197,
+    "sortino_ratio": 0.02848204518564234,
+    "total_trades": 91.0,
+    "win_rate": 1.0,
+    "final_equity": 101599.14287308292
+  },
+  "turnover": {
+    "backtest_days": 30.999305555555555,
+    "trades_per_day": 2.935549631488161,
+    "volume_btc": 4.283645569136735,
+    "volume_btc_per_day": 0.1381852106802773
+  },
+  "orders": {
+    "buy_orders": 130.0,
+    "sell_orders": 110.0,
+    "sell_buy_ratio": 0.8461538461538461
+  },
+  "holding": {
+    "holding_avg_hours": 2.0446886446886445,
+    "holding_p50_hours": 0.3666666666666666,
+    "holding_p75_hours": 1.0416666666666665,
+    "holding_p90_hours": 5.033333333333333,
+    "holding_p95_hours": 7.133333333333333,
+    "holding_max_hours": 70.81666666666666
+  },
+  "inventory": {
+    "exposure_time_usd_hours": 2449452.590483534,
+    "equity_time_usd_hours": 75358382.41874526,
+    "peak_holdings_value_usd": 138574.95776117986,
+    "peak_inventory_ratio": 1.3895684506897734,
+    "avg_inventory_ratio": 0.032866521593584885
+  },
+  "efficiency": {
+    "pnl_per_exposure_usd_hour": 0.0006528572462662943,
+    "pnl_per_exposure_usd_day": 0.015668573910391063
+  },
+  "notes": {
+    "sell_buy_ratio_hint": "If << 1, sells are scarce vs buys -> inventory can accumulate and holding time rises.",
+    "pnl_per_exposure_hint": "Proxy for capital efficiency: total_pnl divided by integral of holdings_value over time."
+  }
+}

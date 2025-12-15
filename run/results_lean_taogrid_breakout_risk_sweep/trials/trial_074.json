@@ -1,0 +1,15 @@
+{
+  "trial": 74,
+  "breakout_band_atr_mult": 2.0,
+  "breakout_band_pct": 0.0008,
+  "breakout_buy_k": 1.6,
+  "breakout_buy_floor": 0.1,
+  "breakout_block_threshold": 0.85,
+  "sharpe_ratio": 5.2038890032702865,
+  "sortino_ratio": 11.96859521949888,
+  "max_drawdown": -0.18463456195150338,
+  "total_return": 0.5547008941299818,
+  "total_trades": 298.0,
+  "avg_holding_period_hours": 1.834228187919463,
+  "output_dir": "run\\results_lean_taogrid_breakout_risk_sweep\\trial_074"
+}
