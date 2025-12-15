@@ -222,6 +222,18 @@ class GridManager:
         """
         if self.buy_levels is None or self.sell_levels is None:
             return {"status": "Grid not initialized"}
+        if len(self.buy_levels) == 0 or len(self.sell_levels) == 0:
+            return {
+                "status": "Empty grid levels",
+                "support": f"${self.config.support:,.0f}",
+                "resistance": f"${self.config.resistance:,.0f}",
+                "mid": f"${(self.config.support + self.config.resistance) / 2:,.0f}",
+                "regime": self.config.regime,
+                "buy_levels": len(self.buy_levels),
+                "sell_levels": len(self.sell_levels),
+                "current_atr": f"${self.current_atr:,.2f}",
+                "avg_atr": f"${self.avg_atr:,.2f}",
+            }
 
         return {
             "support": f"${self.config.support:,.0f}",
@@ -967,6 +979,11 @@ class GridManager:
         if should_shutdown and self.grid_enabled:
             self.grid_enabled = False
             self.grid_shutdown_reason = shutdown_reason
+        elif not should_shutdown and not self.grid_enabled:
+            # Auto re-enable grid when risk conditions improve
+            self.grid_enabled = True
+            self.grid_shutdown_reason = None
+            self.risk_zone_entry_time = None
         
         return risk_level, should_shutdown, shutdown_reason
     

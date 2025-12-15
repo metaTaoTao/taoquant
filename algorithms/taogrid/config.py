@@ -156,6 +156,8 @@ class TaoGridLeanConfig:
     initial_cash: float = 100000.0
     leverage: float = 1.0
     sharpe_annualization_days: int = 365  # crypto spot/perp trades 24/7
+    # Console logging (set False for large sweeps)
+    enable_console_log: bool = True
 
     def __post_init__(self):
         """Validate configuration."""

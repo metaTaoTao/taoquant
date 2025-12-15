@@ -76,7 +76,12 @@ class TaoGridLeanAlgorithm:
         self.pending_orders = {}
         self.filled_orders = []
 
-        print(f"TaoGrid Lean Algorithm initialized: {self.config.name}")
+        self._log(f"TaoGrid Lean Algorithm initialized: {self.config.name}")
+
+    def _log(self, message: str) -> None:
+        """Lightweight console logger controlled by config."""
+        if getattr(self.config, "enable_console_log", True):
+            print(message)
 
     def initialize(
         self,
@@ -109,32 +114,33 @@ class TaoGridLeanAlgorithm:
         self.start_date = start_date
         self.end_date = end_date
 
-        print(f"\n{'='*80}")
-        print(f"TaoGrid Lean Algorithm - Initialization")
-        print(f"{'='*80}")
-        print(f"Symbol: {symbol}")
-        print(f"Period: {start_date.date()} to {end_date.date()}")
-        print(f"Initial Cash: ${self.config.initial_cash:,.0f}")
-        print(f"Leverage: {self.config.leverage}x")
-        print()
+        self._log(f"\n{'='*80}")
+        self._log("TaoGrid Lean Algorithm - Initialization")
+        self._log(f"{'='*80}")
+        self._log(f"Symbol: {symbol}")
+        self._log(f"Period: {start_date.date()} to {end_date.date()}")
+        self._log(f"Initial Cash: ${self.config.initial_cash:,.0f}")
+        self._log(f"Leverage: {self.config.leverage}x")
+        self._log("")
 
         # Setup grid using historical data
         if historical_data is not None:
-            print("Setting up grid...")
+            self._log("Setting up grid...")
             self.grid_manager.setup_grid(historical_data)
 
-            # Print grid info
-            grid_info = self.grid_manager.get_grid_info()
-            print("\nGrid Configuration:")
-            print("-" * 80)
-            for key, value in grid_info.items():
-                print(f"{key}: {value}")
-            print("-" * 80)
-            print()
+            # Print grid info only when console logging is enabled
+            if getattr(self.config, "enable_console_log", True):
+                grid_info = self.grid_manager.get_grid_info()
+                self._log("\nGrid Configuration:")
+                self._log("-" * 80)
+                for key, value in grid_info.items():
+                    self._log(f"{key}: {value}")
+                self._log("-" * 80)
+                self._log("")
 
         self.initialized = True
-        print("Initialization complete!")
-        print(f"{'='*80}\n")
+        self._log("Initialization complete!")
+        self._log(f"{'='*80}\n")
 
     def on_data(self, current_time: datetime, bar_data: dict, portfolio_state: dict):
         """
@@ -171,7 +177,7 @@ class TaoGridLeanAlgorithm:
             }
         """
         if not self.initialized:
-            print("ERROR: Algorithm not initialized!")
+            self._log("ERROR: Algorithm not initialized!")
             return None
 
         # Extract bar data
@@ -186,37 +192,11 @@ class TaoGridLeanAlgorithm:
         # Update daily tracking
         self._update_daily_state(current_time, portfolio_state)
 
-        # Check if any pending limit order is triggered
-        # Use bar index to avoid duplicate triggers (we'll pass it from runner)
-        triggered_order = self.grid_manager.check_limit_order_triggers(
-            current_price=current_price,
-            prev_price=prev_price,
-            bar_high=bar_high,
-            bar_low=bar_low,
-            bar_index=getattr(self, '_current_bar_index', None)
-        )
-        
-        if triggered_order is None:
-            # No limit order triggered, save current price for next bar
-            self._prev_price = current_price
-            return None  # No trigger, do nothing
-
-        # Check if grid is disabled (shutdown)
-        if not self.grid_manager.grid_enabled:
-            print(
-                f"[{current_time}] Grid disabled - {self.grid_manager.grid_shutdown_reason}. "
-                f"Waiting for manual re-enable."
-            )
-            self._prev_price = current_price
-            return None  # Grid disabled, do not place orders
-        
-        # Check risk level and potential shutdown
+        # Always check risk level (even when grid is currently disabled).
+        # This is required for "auto re-enable" behavior implemented in GridManager.check_risk_level().
         equity = portfolio_state.get("equity", self.config.initial_cash)
-        holdings_btc = portfolio_state.get("holdings", 0.0)
-        # Calculate unrealized PnL (simplified: current value - cost basis)
-        # For more accurate calculation, we'd need to track cost basis per position
         unrealized_pnl = portfolio_state.get("unrealized_pnl", 0.0)
-        
+
         risk_level, should_shutdown, shutdown_reason = self.grid_manager.check_risk_level(
             current_price=current_price,
             equity=equity,
@@ -225,7 +205,7 @@ class TaoGridLeanAlgorithm:
         )
         
         if should_shutdown:
-            print(
+            self._log(
                 f"[{current_time}] [WARNING] GRID SHUTDOWN: {shutdown_reason} "
                 f"(Risk Level: {risk_level})"
             )
@@ -233,10 +213,35 @@ class TaoGridLeanAlgorithm:
             return None  # Grid shutdown, do not place orders
         
         if risk_level > 0:
-            print(
+            self._log(
                 f"[{current_time}] Risk Level {risk_level} active "
                 f"(price: ${current_price:,.0f}, support: ${self.config.support:,.0f})"
             )
+
+        # If grid is disabled but risk conditions have improved, GridManager may have auto re-enabled it.
+        # If still disabled, do not place orders.
+        if not self.grid_manager.grid_enabled:
+            self._log(
+                f"[{current_time}] Grid disabled - {self.grid_manager.grid_shutdown_reason}. "
+                f"Waiting for auto re-enable."
+            )
+            self._prev_price = current_price
+            return None
+
+        # Check if any pending limit order is triggered
+        # Use bar index to avoid duplicate triggers (we'll pass it from runner)
+        triggered_order = self.grid_manager.check_limit_order_triggers(
+            current_price=current_price,
+            prev_price=prev_price,
+            bar_high=bar_high,
+            bar_low=bar_low,
+            bar_index=getattr(self, "_current_bar_index", None),
+        )
+
+        if triggered_order is None:
+            # No limit order triggered, save current price for next bar
+            self._prev_price = current_price
+            return None  # No trigger, do nothing
 
         direction = triggered_order['direction']
         level_index = triggered_order['level_index']
@@ -274,7 +279,7 @@ class TaoGridLeanAlgorithm:
 
         # Check if order should be placed
         if size == 0:
-            print(
+            self._log(
                 f"[{current_time}] Order blocked - {direction.upper()} L{level_index+1} "
                 f"@ ${level_price:,.0f}: {throttle_status.reason}"
             )
@@ -287,18 +292,18 @@ class TaoGridLeanAlgorithm:
         # Log order
         inventory_state = self.grid_manager.get_inventory_state()
         if throttle_status.size_multiplier < 1.0:
-            print(
+            self._log(
                 f"[{current_time}] Order throttled ({throttle_status.size_multiplier:.0%}) - "
                 f"{direction.upper()} L{level_index+1} @ ${level_price:,.0f}: "
                 f"{throttle_status.reason}"
             )
         else:
-            print(
+            self._log(
                 f"[{current_time}] Order triggered - {direction.upper()} L{level_index+1} "
                 f"@ ${level_price:,.0f}, Size: {size:.4f} BTC"
             )
 
-        print(
+        self._log(
             f"  Inventory: Long {inventory_state['long_exposure']:.2f} "
             f"({inventory_state['long_pct']:.0%}), "
             f"Short {inventory_state['short_exposure']:.2f} "
@@ -363,7 +368,7 @@ class TaoGridLeanAlgorithm:
             if self.grid_manager.sell_levels is not None and target_sell_level < len(self.grid_manager.sell_levels):
                 target_sell_price = self.grid_manager.sell_levels[target_sell_level]
                 self.grid_manager.place_pending_order('sell', target_sell_level, target_sell_price)
-                print(f"  Placed sell limit order at L{target_sell_level+1} @ ${target_sell_price:,.0f}")
+                self._log(f"  Placed sell limit order at L{target_sell_level+1} @ ${target_sell_price:,.0f}")
             # IMPORTANT (inventory-aware grid):
             # Do NOT immediately re-place the same buy order after a buy fill.
             # We wait until the corresponding sell is filled, then re-enter.
@@ -376,7 +381,7 @@ class TaoGridLeanAlgorithm:
             if self.grid_manager.buy_levels is not None and level < len(self.grid_manager.buy_levels):
                 buy_level_price = self.grid_manager.buy_levels[level]
                 self.grid_manager.place_pending_order('buy', level, buy_level_price)
-                print(f"  Placed buy limit order at L{level+1} @ ${buy_level_price:,.0f} (re-entry)")
+                self._log(f"  Placed buy limit order at L{level+1} @ ${buy_level_price:,.0f} (re-entry)")
 
         # Track filled order
         self.filled_orders.append(order)
@@ -384,7 +389,7 @@ class TaoGridLeanAlgorithm:
         # Reset triggered flag for all orders (in case order was removed before reset)
         self.grid_manager.reset_triggered_orders()
 
-        print(
+        self._log(
             f"  Order filled - {direction.upper()} {size:.4f} BTC @ ${price:,.0f} (L{level+1})"
         )
 

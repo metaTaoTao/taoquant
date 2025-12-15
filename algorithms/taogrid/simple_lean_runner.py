@@ -40,9 +40,11 @@ class SimpleLeanRunner:
         timeframe: str,
         start_date: datetime,
         end_date: datetime,
+        data: pd.DataFrame | None = None,
         output_dir: Path | None = None,
         verbose: bool = True,
         progress_every: int = 100,
+        collect_equity_detail: bool = True,
     ):
         """Initialize runner with config."""
         self.config = config
@@ -50,14 +52,20 @@ class SimpleLeanRunner:
         self.timeframe = timeframe
         self.start_date = start_date
         self.end_date = end_date
+        self._data_override = data
         self.output_dir = output_dir
         self.verbose = verbose
         self.progress_every = max(1, int(progress_every))
+        self.collect_equity_detail = bool(collect_equity_detail)
 
         self.algorithm = TaoGridLeanAlgorithm(config)
 
         # Results tracking
+        # To keep optimization runs fast, we allow a lightweight equity curve
+        # representation (timestamp + equity only).
         self.equity_curve = []
+        self._equity_timestamps: list[datetime] = []
+        self._equity_values: list[float] = []
         self.trades = []
         self.orders = []
         self.daily_pnl = []
@@ -75,8 +83,20 @@ class SimpleLeanRunner:
 
     def load_data(self) -> pd.DataFrame:
         """Load historical data."""
+        if self._data_override is not None:
+            data = self._data_override
+            if not isinstance(data.index, pd.DatetimeIndex):
+                raise ValueError("Provided data must be indexed by DatetimeIndex")
+            # Ensure UTC-aware slicing (DataManager returns UTC-aware index)
+            start = pd.Timestamp(self.start_date).tz_convert("UTC") if pd.Timestamp(self.start_date).tzinfo else pd.Timestamp(self.start_date, tz="UTC")
+            end = pd.Timestamp(self.end_date).tz_convert("UTC") if pd.Timestamp(self.end_date).tzinfo else pd.Timestamp(self.end_date, tz="UTC")
+            sliced = data.loc[(data.index >= start) & (data.index < end)]
+            if sliced.empty:
+                raise ValueError(f"Provided data does not cover requested range: {start} to {end}")
+            return sliced
+
         if self.verbose:
-        print("Loading data...")
+            print("Loading data...")
         data_manager = DataManager()
 
         data = data_manager.get_klines(
@@ -88,16 +108,16 @@ class SimpleLeanRunner:
         )
 
         if self.verbose:
-        print(f"  Loaded {len(data)} bars from {data.index[0]} to {data.index[-1]}")
+            print(f"  Loaded {len(data)} bars from {data.index[0]} to {data.index[-1]}")
         return data
 
     def run(self) -> dict:
         """Run backtest."""
         if self.verbose:
-        print("=" * 80)
-        print("TaoGrid Lean Backtest (Simplified Runner)")
-        print("=" * 80)
-        print()
+            print("=" * 80)
+            print("TaoGrid Lean Backtest (Simplified Runner)")
+            print("=" * 80)
+            print()
 
         # Load data
         data = self.load_data()
@@ -169,46 +189,50 @@ class SimpleLeanRunner:
             data["vol_score"] = 0.0
 
         # Funding rate (perp) factor: fetch from OKX public API and align to bar timestamps.
-        try:
-            dm = DataManager()
-            funding = dm.get_funding_rates(
-                symbol=self.symbol,
-                start=self.start_date,
-                end=self.end_date,
-                source="okx",
-                use_cache=True,
-                allow_empty=True,
-            )
-            if funding is None or funding.empty:
+        if getattr(self.config, "enable_funding_factor", True):
+            try:
+                dm = DataManager()
+                funding = dm.get_funding_rates(
+                    symbol=self.symbol,
+                    start=self.start_date,
+                    end=self.end_date,
+                    source="okx",
+                    use_cache=True,
+                    allow_empty=True,
+                )
+                if funding is None or funding.empty:
+                    data["funding_rate"] = 0.0
+                    data["minutes_to_funding"] = np.nan
+                else:
+                    # Align to OHLCV timestamps by forward filling.
+                    funding_aligned = funding.reindex(data.index, method="ffill").fillna(0.0)
+                    data["funding_rate"] = funding_aligned["funding_rate"].astype(float)
+
+                    # Compute minutes to next funding settlement time (fundingTime schedule).
+                    funding_times = funding.index.sort_values()
+                    # For each bar ts, find next funding_time >= ts using merge_asof(direction="forward")
+                    ts_df = pd.DataFrame({"timestamp": data.index}).sort_values("timestamp")
+                    ft_df = pd.DataFrame({"funding_time": funding_times})
+                    merged = pd.merge_asof(
+                        ts_df,
+                        ft_df,
+                        left_on="timestamp",
+                        right_on="funding_time",
+                        direction="forward",
+                        allow_exact_matches=True,
+                    )
+                    mins = (merged["funding_time"] - merged["timestamp"]).dt.total_seconds() / 60.0
+                    data["minutes_to_funding"] = mins.values
+            except Exception:
                 data["funding_rate"] = 0.0
                 data["minutes_to_funding"] = np.nan
-            else:
-                # Align to OHLCV timestamps by forward filling.
-                funding_aligned = funding.reindex(data.index, method="ffill").fillna(0.0)
-                data["funding_rate"] = funding_aligned["funding_rate"].astype(float)
-
-                # Compute minutes to next funding settlement time (fundingTime schedule).
-                funding_times = funding.index.sort_values()
-                # For each bar ts, find next funding_time >= ts using merge_asof(direction="forward")
-                ts_df = pd.DataFrame({"timestamp": data.index}).sort_values("timestamp")
-                ft_df = pd.DataFrame({"funding_time": funding_times})
-                merged = pd.merge_asof(
-                    ts_df,
-                    ft_df,
-                    left_on="timestamp",
-                    right_on="funding_time",
-                    direction="forward",
-                    allow_exact_matches=True,
-                )
-                mins = (merged["funding_time"] - merged["timestamp"]).dt.total_seconds() / 60.0
-                data["minutes_to_funding"] = mins.values
-        except Exception:
+        else:
             data["funding_rate"] = 0.0
             data["minutes_to_funding"] = np.nan
 
         # Initialize algorithm with historical data
         if self.verbose:
-        print("Initializing algorithm...")
+            print("Initializing algorithm...")
         historical_data = data.head(100)  # Use first 100 bars for ATR calc
         self.algorithm.initialize(
             symbol=self.symbol,
@@ -219,7 +243,7 @@ class SimpleLeanRunner:
 
         # Run bar-by-bar
         if self.verbose:
-        print("Running backtest...")
+            print("Running backtest...")
         print()
 
         for i, (timestamp, row) in enumerate(data.iterrows()):
@@ -288,25 +312,35 @@ class SimpleLeanRunner:
                         # match_result is used for trade recording in execute_order
 
             # Record equity
-            self.equity_curve.append({
-                'timestamp': timestamp,
-                'equity': current_equity,
-                'cash': self.cash,
-                'holdings': self.holdings,
-                'holdings_value': self.holdings * row['close'],
-            })
+            if self.collect_equity_detail:
+                self.equity_curve.append({
+                    'timestamp': timestamp,
+                    'equity': current_equity,
+                    'cash': self.cash,
+                    'holdings': self.holdings,
+                    'holdings_value': self.holdings * row['close'],
+                })
+            else:
+                self._equity_timestamps.append(timestamp)
+                self._equity_values.append(float(current_equity))
 
         if self.verbose:
-        print()
-        print("  Backtest completed!")
-        print()
+            print()
+            print("  Backtest completed!")
+            print()
 
         # Calculate metrics
         metrics = self.calculate_metrics()
 
+        equity_df = (
+            pd.DataFrame(self.equity_curve)
+            if self.collect_equity_detail
+            else pd.DataFrame({"timestamp": self._equity_timestamps, "equity": self._equity_values})
+        )
+
         return {
             'metrics': metrics,
-            'equity_curve': pd.DataFrame(self.equity_curve),
+            'equity_curve': equity_df,
             'trades': pd.DataFrame(self.trades) if self.trades else pd.DataFrame(),
             'orders': pd.DataFrame(self.orders) if self.orders else pd.DataFrame(),
         }
@@ -418,8 +452,9 @@ class SimpleLeanRunner:
 
                 self.cash += net_proceeds
                 self.holdings -= size
-                # Update cost basis: reduce proportionally when selling
-                # (will be updated more accurately after matching with buy positions)
+                
+                # Track total cost basis reduction for accurate unrealized PnL calculation
+                total_cost_basis_reduction = 0.0
 
                 # Match against long positions using grid pairing (buy[i] -> sell[i])
                 # Use grid_manager.match_sell_order for proper grid pairing
@@ -458,6 +493,11 @@ class SimpleLeanRunner:
                     sell_cost_portion = (matched_size / size) * (commission + slippage)
                     buy_cost_portion = (matched_size / buy_size) * buy_cost
                     
+                    # Track cost basis reduction (based on entry price, not entry_cost which includes fees)
+                    # cost_basis tracks the price basis, not the full cost including fees
+                    matched_cost_basis = matched_size * buy_price
+                    total_cost_basis_reduction += matched_cost_basis
+                    
                     trade_pnl = sell_proceeds_portion - buy_cost_portion
                     trade_return_pct = trade_pnl / buy_cost_portion if buy_cost_portion > 0 else 0
                     
@@ -486,6 +526,15 @@ class SimpleLeanRunner:
                     # Remove position if fully matched
                     if buy_pos['size'] < 0.0001:
                         self.long_positions.remove(buy_pos)
+                
+                # Update total cost basis after matching (reduce by matched positions' cost basis)
+                self.total_cost_basis -= total_cost_basis_reduction
+                # Ensure cost basis doesn't go negative
+                self.total_cost_basis = max(0.0, self.total_cost_basis)
+                
+                # Safety check: if holdings is zero, cost basis should also be zero
+                if abs(self.holdings) < 1e-8:
+                    self.total_cost_basis = 0.0
 
                 # Record all matched trades
                 self.trades.extend(matched_trades)
@@ -517,7 +566,11 @@ class SimpleLeanRunner:
 
     def calculate_metrics(self) -> dict:
         """Calculate performance metrics."""
-        equity_df = pd.DataFrame(self.equity_curve)
+        equity_df = (
+            pd.DataFrame(self.equity_curve)
+            if self.collect_equity_detail
+            else pd.DataFrame({"timestamp": self._equity_timestamps, "equity": self._equity_values})
+        )
         trades_df = pd.DataFrame(self.trades) if self.trades else pd.DataFrame()
 
         initial_equity = self.config.initial_cash
@@ -651,7 +704,7 @@ class SimpleLeanRunner:
             results['orders'].to_csv(output_dir / "orders.csv", index=False)
 
         if self.verbose:
-        print(f"Results saved to: {output_dir}")
+            print(f"Results saved to: {output_dir}")
 
     def print_summary(self, results: dict):
         """Print results summary."""
@@ -740,6 +793,9 @@ def main():
         enable_throttling=True,
         initial_cash=100000.0,
         leverage=50.0,
+        # Temporarily disable MM risk zone to test basic trading logic
+        # After verifying basic functionality works, re-enable with adjusted thresholds
+        enable_mm_risk_zone=False,
     )
 
     # Run backtest
@@ -747,8 +803,8 @@ def main():
         config=config,
         symbol="BTCUSDT",
         timeframe="1m",
-        start_date=datetime(2025, 9, 26, tzinfo=timezone.utc),
-        end_date=datetime(2025, 10, 26, tzinfo=timezone.utc),
+        start_date=datetime(2025, 7, 10, tzinfo=timezone.utc),
+        end_date=datetime(2025, 8, 10, tzinfo=timezone.utc),
     )
     results = runner.run()
 
@@ -760,8 +816,8 @@ def main():
     runner.save_results(results, output_dir)
 
     if runner.verbose:
-    print()
-    print("Next steps:")
+        print()
+        print("Next steps:")
         print(f"1. Review metrics in: {output_dir}/metrics.json")
         print(f"2. Analyze trades in: {output_dir}/trades.csv")
         print(f"3. Plot equity curve from: {output_dir}/equity_curve.csv")
