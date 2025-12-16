@@ -282,6 +282,16 @@ class SimpleLeanRunner:
                 'holdings': self.holdings,
                 'unrealized_pnl': unrealized_pnl,
             }
+            
+            # Debug logging around shutdown time (first hour only, to avoid spam)
+            if (self.verbose and 
+                timestamp <= pd.Timestamp("2025-09-26 01:00:00", tz='UTC') and
+                (abs(unrealized_pnl) > current_equity * 0.2 or 
+                 self.algorithm.grid_manager.risk_level >= 3)):
+                unrealized_pnl_pct = (unrealized_pnl / current_equity) if current_equity > 0 else 0.0
+                print(f"[DEBUG {timestamp}] equity=${current_equity:,.2f} holdings={self.holdings:.4f} "
+                      f"cost_basis=${self.total_cost_basis:,.2f} unrealized_pnl=${unrealized_pnl:,.2f} "
+                      f"({unrealized_pnl_pct:.2%}) price=${row['close']:,.2f}")
 
             # Process with TaoGrid algorithm
             order = self.algorithm.on_data(timestamp, bar_data, portfolio_state)
@@ -457,7 +467,8 @@ class SimpleLeanRunner:
                 total_cost_basis_reduction = 0.0
 
                 # Match against long positions using grid pairing (buy[i] -> sell[i])
-                # Use grid_manager.match_sell_order for proper grid pairing
+                # Try grid_manager.match_sell_order first for proper grid pairing
+                # If that fails, fall back to FIFO matching from long_positions to ensure cost_basis is updated
                 remaining_sell_size = size
                 matched_trades = []
 
@@ -469,19 +480,36 @@ class SimpleLeanRunner:
                     )
                     
                     if match_result is None:
-                        break  # No more matching positions
-                    
-                    buy_level_idx, buy_price, matched_size = match_result
-                    
-                    # Find corresponding position in long_positions
-                    buy_pos = None
-                    for pos in self.long_positions:
-                        if pos['level'] == buy_level_idx and abs(pos['price'] - buy_price) < 0.01:
-                            buy_pos = pos
-                            break
+                        # Grid pairing failed - fall back to FIFO matching from long_positions
+                        # This ensures cost_basis is always updated, even if grid pairing logic has issues
+                        if not self.long_positions:
+                            break  # No positions to match
+                        
+                        # FIFO: match against first position in queue
+                        buy_pos = self.long_positions[0]
+                        buy_level_idx = buy_pos['level']
+                        buy_price = buy_pos['price']
+                        matched_size = min(remaining_sell_size, buy_pos['size'])
+                    else:
+                        buy_level_idx, buy_price, matched_size = match_result
+                        
+                        # Find corresponding position in long_positions
+                        buy_pos = None
+                        for pos in self.long_positions:
+                            if pos['level'] == buy_level_idx and abs(pos['price'] - buy_price) < 0.01:
+                                buy_pos = pos
+                                break
+                        
+                        if buy_pos is None:
+                            # Position not found in long_positions, try FIFO fallback
+                            if not self.long_positions:
+                                break
+                            buy_pos = self.long_positions[0]
+                            buy_level_idx = buy_pos['level']
+                            buy_price = buy_pos['price']
+                            matched_size = min(remaining_sell_size, buy_pos['size'])
                     
                     if buy_pos is None:
-                        # Position not found in long_positions, skip
                         break
                     
                     buy_size = buy_pos['size']
@@ -803,8 +831,8 @@ def main():
         config=config,
         symbol="BTCUSDT",
         timeframe="1m",
-        start_date=datetime(2025, 7, 10, tzinfo=timezone.utc),
-        end_date=datetime(2025, 8, 10, tzinfo=timezone.utc),
+        start_date=datetime(2025, 9, 26, tzinfo=timezone.utc),
+        end_date=datetime(2025, 10, 26, tzinfo=timezone.utc),
     )
     results = runner.run()
 
