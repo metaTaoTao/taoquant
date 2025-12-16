@@ -352,6 +352,12 @@ class GridManager:
                 level_key = f"buy_L{level_index + 1}"
                 if self.filled_levels.get(level_key, False):
                     triggered = False
+                    # Log when order is blocked due to filled_levels
+                    if getattr(self.config, "enable_console_log", False):
+                        print(f"[FILLED_LEVELS] BUY L{level_index+1} @ ${limit_price:,.0f} blocked - level already filled (filled_levels count: {len(self.filled_levels)})")
+                elif not touched and getattr(self.config, "enable_console_log", False):
+                    # Log when order is not triggered due to price not touching
+                    print(f"[ORDER_TRIGGER] BUY L{level_index+1} @ ${limit_price:,.0f} not triggered - price not touched (current: ${current_price:,.0f}, bar: ${bar_low:,.0f}-${bar_high:,.0f})")
                     
             elif direction == 'sell':
                 # Sell limit: only fills if bar range touches the limit price
@@ -370,6 +376,11 @@ class GridManager:
                 else:
                     # No long positions, cannot sell
                     triggered = False
+                    if getattr(self.config, "enable_console_log", False):
+                        print(f"[ORDER_TRIGGER] SELL L{level_index+1} @ ${limit_price:,.0f} not triggered - no long positions (long_exposure: {inventory_state.long_exposure:.4f})")
+                if not touched and getattr(self.config, "enable_console_log", False):
+                    # Log when order is not triggered due to price not touching
+                    print(f"[ORDER_TRIGGER] SELL L{level_index+1} @ ${limit_price:,.0f} not triggered - price not touched (current: ${current_price:,.0f}, bar: ${bar_low:,.0f}-${bar_high:,.0f})")
             
             if triggered:
                 # Mark this bar as checked to avoid duplicate triggers
@@ -377,6 +388,9 @@ class GridManager:
                 if bar_index is not None:
                     order['last_checked_bar'] = bar_index
                 order['triggered'] = True  # Mark as triggered
+                # Log when order is triggered
+                if getattr(self.config, "enable_console_log", False):
+                    print(f"[ORDER_TRIGGER] {direction.upper()} L{level_index+1} @ ${limit_price:,.0f} TRIGGERED (current: ${current_price:,.0f}, bar: ${bar_low:,.0f}-${bar_high:,.0f})")
                 # Return triggered order (size will be calculated in on_data)
                 return order
         
@@ -385,7 +399,7 @@ class GridManager:
     def remove_pending_order(self, direction: str, level_index: int) -> None:
         """
         Remove a pending limit order after it's been filled.
-        
+
         Parameters
         ----------
         direction : str
@@ -393,10 +407,16 @@ class GridManager:
         level_index : int
             Grid level index
         """
+        before_count = len(self.pending_limit_orders)
         self.pending_limit_orders = [
             order for order in self.pending_limit_orders
             if not (order['direction'] == direction and order['level_index'] == level_index)
         ]
+        after_count = len(self.pending_limit_orders)
+        
+        # Log order removal
+        if getattr(self.config, "enable_console_log", False) and before_count != after_count:
+            print(f"[PENDING_ORDER] Removed {direction.upper()} L{level_index+1} (pending_orders: {before_count} -> {after_count})")
     
     def reset_triggered_orders(self) -> None:
         """
@@ -431,6 +451,8 @@ class GridManager:
         # Check if order already exists
         for order in self.pending_limit_orders:
             if order['direction'] == direction and order['level_index'] == level_index:
+                if getattr(self.config, "enable_console_log", False):
+                    print(f"[PENDING_ORDER] {direction.upper()} L{level_index+1} @ ${level_price:,.0f} already exists, skipping")
                 return  # Already exists
         
         # Add new pending order
@@ -442,6 +464,10 @@ class GridManager:
             'placed': True,
             'last_checked_bar': None,  # Track which bar we last checked
         })
+        
+        # Log order placement
+        if getattr(self.config, "enable_console_log", False):
+            print(f"[PENDING_ORDER] Placed {direction.upper()} L{level_index+1} @ ${level_price:,.0f} (pending_orders count: {len(self.pending_limit_orders)})")
     
     def check_grid_trigger(
         self, current_price: float
@@ -523,6 +549,10 @@ class GridManager:
 
         # Apply leverage (if > 1.0)
         base_size_btc = base_size_btc * self.config.leverage
+        
+        # Log initial size calculation
+        if getattr(self.config, "enable_console_log", False):
+            print(f"[ORDER_SIZE] {direction.upper()} L{level_index+1} @ ${level_price:,.0f} - base_size={base_size_btc:.4f} BTC (equity=${equity:,.0f}, risk_budget={self.config.risk_budget_pct:.1%}, weight={weight:.4f}, leverage={self.config.leverage}x)")
 
         # Market Maker Risk Zone (MM Risk Mode)
         # When price breaks below support + volatility buffer, enter risk mode:
@@ -747,12 +777,21 @@ class GridManager:
 
             # Apply throttle multiplier
             size_btc = base_size_btc * throttle_status.size_multiplier
-
-            return size_btc, throttle_status
         else:
             from risk_management.grid_risk_manager import ThrottleStatus
-
-            return base_size_btc, ThrottleStatus(size_multiplier=1.0, reason="No throttle")
+            size_btc = base_size_btc
+            throttle_status = ThrottleStatus(size_multiplier=1.0, reason="No throttle")
+        
+        # Log final size
+        if getattr(self.config, "enable_console_log", False):
+            if size_btc == 0.0:
+                print(f"[ORDER_SIZE] {direction.upper()} L{level_index+1} @ ${level_price:,.0f} - FINAL SIZE=0 (blocked: {throttle_status.reason})")
+            elif throttle_status.size_multiplier < 1.0:
+                print(f"[ORDER_SIZE] {direction.upper()} L{level_index+1} @ ${level_price:,.0f} - FINAL SIZE={size_btc:.4f} BTC (throttled: {throttle_status.size_multiplier:.1%}, reason: {throttle_status.reason})")
+            else:
+                print(f"[ORDER_SIZE] {direction.upper()} L{level_index+1} @ ${level_price:,.0f} - FINAL SIZE={size_btc:.4f} BTC")
+        
+        return size_btc, throttle_status
 
     def add_buy_position(
         self, buy_level_index: int, size: float, buy_price: float
@@ -782,6 +821,12 @@ class GridManager:
         # Grid strategy: keep buying at this level as long as price is in range
         # filled_levels is now managed in on_order_filled (reset immediately after buy)
         # self.filled_levels[level_key] = True  # REMOVED: allow continuous orders
+        
+        # Log filled_levels state when adding buy position
+        if getattr(self.config, "enable_console_log", False):
+            filled_count = len(self.filled_levels)
+            is_filled = self.filled_levels.get(level_key, False)
+            print(f"[FILLED_LEVELS] Add BUY L{buy_level_index+1} @ ${buy_price:,.0f} - filled_levels count: {filled_count}, this level filled: {is_filled}")
         
         # Target sell level: same index (buy_level[i] -> sell_level[i])
         # With fixed grid generation: sell_levels are generated from buy_levels
@@ -820,6 +865,11 @@ class GridManager:
             If matched: (buy_level_index, buy_price, matched_size)
             If not matched: None
         """
+        # Log match attempt
+        if getattr(self.config, "enable_console_log", False):
+            total_buy_positions = sum(len(positions) for positions in self.buy_positions.values())
+            print(f"[SELL_MATCH] Attempting to match SELL L{sell_level_index+1} size={sell_size:.4f} against {total_buy_positions} buy positions")
+        
         # Find buy position targeting this sell level
         for buy_level_idx, positions in list(self.buy_positions.items()):
             for pos_idx, pos in enumerate(positions):
@@ -827,6 +877,10 @@ class GridManager:
                     # Match found
                     matched_size = min(sell_size, pos['size'])
                     buy_price = pos['buy_price']
+                    
+                    # Log successful match
+                    if getattr(self.config, "enable_console_log", False):
+                        print(f"[SELL_MATCH] SUCCESS: SELL L{sell_level_index+1} matched with BUY L{buy_level_idx+1} @ ${buy_price:,.0f}, matched_size={matched_size:.4f}")
                     
                     # Update position
                     pos['size'] -= matched_size
@@ -842,8 +896,23 @@ class GridManager:
                         buy_level_key = f"buy_L{buy_level_idx + 1}"
                         if buy_level_key in self.filled_levels:
                             del self.filled_levels[buy_level_key]
+                            # Log when filled_levels is reset
+                            if getattr(self.config, "enable_console_log", False):
+                                print(f"[FILLED_LEVELS] Reset BUY L{buy_level_idx+1} after sell match (filled_levels count: {len(self.filled_levels)})")
                     
                     return (buy_level_idx, buy_price, matched_size)
+        
+        # Log match failure
+        if getattr(self.config, "enable_console_log", False):
+            print(f"[SELL_MATCH] FAILED: SELL L{sell_level_index+1} size={sell_size:.4f} - no matching buy position found (target_sell_level={sell_level_index})")
+            # Show available buy positions for debugging
+            available_levels = []
+            for buy_level_idx, positions in self.buy_positions.items():
+                for pos in positions:
+                    target_level = pos.get('target_sell_level', -1)
+                    available_levels.append(f"BUY L{buy_level_idx+1} -> SELL L{target_level+1} (size={pos['size']:.4f})")
+            if available_levels:
+                print(f"[SELL_MATCH] Available buy positions: {', '.join(available_levels[:5])}")
         
         return None
     

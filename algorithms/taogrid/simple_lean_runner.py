@@ -249,6 +249,15 @@ class SimpleLeanRunner:
         for i, (timestamp, row) in enumerate(data.iterrows()):
             if self.verbose and i % self.progress_every == 0:
                 print(f"  Processing bar {i}/{len(data)} ({i/len(data)*100:.1f}%)", end="\r")
+            
+            # Periodic filled_levels summary log (every 1000 bars)
+            if i > 0 and i % 1000 == 0 and getattr(self.algorithm.config, "enable_console_log", False):
+                filled_levels = self.algorithm.grid_manager.filled_levels
+                filled_count = len(filled_levels)
+                filled_keys = list(filled_levels.keys())[:10]  # Show first 10
+                pending_orders_count = len(self.algorithm.grid_manager.pending_limit_orders)
+                buy_positions_count = sum(len(positions) for positions in self.algorithm.grid_manager.buy_positions.values())
+                print(f"\n[FILLED_LEVELS_SUMMARY] Bar {i} @ {timestamp}: filled_levels={filled_count}, pending_orders={pending_orders_count}, buy_positions={buy_positions_count}, samples={filled_keys}")
 
             # Set current bar index for limit order trigger checking
             self.algorithm._current_bar_index = i
@@ -298,10 +307,19 @@ class SimpleLeanRunner:
 
             # Execute orders (on_data returns order dict directly, or None)
             if order:
+                # Log order received
+                if getattr(self.config, "enable_console_log", False):
+                    print(f"[ORDER_EXECUTE] Received {order['direction'].upper()} L{order['level']+1} @ ${order['price']:,.0f}, size={order['quantity']:.4f} BTC")
+                
                 executed = self.execute_order(order, bar_open=row['open'], market_price=row['close'], timestamp=timestamp)
 
                 # Update grid manager inventory if order was executed
                 if executed:
+                    if getattr(self.config, "enable_console_log", False):
+                        print(f"[ORDER_EXECUTE] {order['direction'].upper()} L{order['level']+1} EXECUTED successfully")
+                else:
+                    if getattr(self.config, "enable_console_log", False):
+                        print(f"[ORDER_EXECUTE] {order['direction'].upper()} L{order['level']+1} FAILED to execute")
                     # For buy orders, add to grid manager positions first
                     if order['direction'] == 'buy':
                         self.algorithm.grid_manager.add_buy_position(
@@ -429,6 +447,14 @@ class SimpleLeanRunner:
                     'timestamp': timestamp,
                     'entry_cost': total_cost,
                 })
+                
+                # Log buy execution
+                if getattr(self.config, "enable_console_log", False):
+                    print(f"[BUY_EXECUTED] L{level+1} @ ${execution_price:,.0f}, size={size:.4f} BTC, holdings={self.holdings:.4f}, long_positions_count={len(self.long_positions)}, cost_basis=${self.total_cost_basis:,.0f}")
+            else:
+                # Log buy rejection
+                if getattr(self.config, "enable_console_log", False):
+                    print(f"[BUY_REJECTED] L{level+1} @ ${execution_price:,.0f}, size={size:.4f} BTC - leverage constraint: new_notional=${new_notional:,.0f} > max_notional=${max_notional:,.0f} (equity=${equity:,.0f}, leverage={self.config.leverage}x)")
 
                 self.orders.append({
                     'timestamp': timestamp,
@@ -482,8 +508,21 @@ class SimpleLeanRunner:
                     if match_result is None:
                         # Grid pairing failed - fall back to FIFO matching from long_positions
                         # This ensures cost_basis is always updated, even if grid pairing logic has issues
+                        if getattr(self.config, "enable_console_log", False):
+                            print(f"[SELL_MATCH_FIFO] Grid pairing failed for SELL L{level+1}, falling back to FIFO (remaining_size={remaining_sell_size:.4f}, long_positions_count={len(self.long_positions)})")
                         if not self.long_positions:
+                            if getattr(self.config, "enable_console_log", False):
+                                print(f"[SELL_MATCH_FIFO] No long positions available for FIFO matching")
                             break  # No positions to match
+                        
+                        # FIFO: match against first position in queue
+                        buy_pos = self.long_positions[0]
+                        buy_level_idx = buy_pos['level']
+                        buy_price = buy_pos['price']
+                        matched_size = min(remaining_sell_size, buy_pos['size'])
+                        
+                        if getattr(self.config, "enable_console_log", False):
+                            print(f"[SELL_MATCH_FIFO] FIFO match: SELL L{level+1} matched with BUY L{buy_level_idx+1} @ ${buy_price:,.0f}, matched_size={matched_size:.4f}")
                         
                         # FIFO: match against first position in queue
                         buy_pos = self.long_positions[0]
@@ -545,6 +584,10 @@ class SimpleLeanRunner:
                         'return_pct': trade_return_pct,
                         'holding_period': (timestamp - buy_timestamp).total_seconds() / 3600,  # hours
                     })
+                    
+                    # Log matched trade
+                    if getattr(self.config, "enable_console_log", False):
+                        print(f"[TRADE_MATCHED] BUY L{buy_level_idx+1} @ ${buy_price:,.0f} -> SELL L{level+1} @ ${execution_price:,.0f}, size={matched_size:.4f} BTC, PnL=${trade_pnl:,.2f} ({trade_return_pct:.2%}), holding={trade_pnl/buy_price if buy_price > 0 else 0:.1f}h")
 
                     # Update positions
                     remaining_sell_size -= matched_size
@@ -566,6 +609,13 @@ class SimpleLeanRunner:
 
                 # Record all matched trades
                 self.trades.extend(matched_trades)
+                
+                # Log trade recording and sell execution
+                if getattr(self.config, "enable_console_log", False):
+                    print(f"[SELL_EXECUTED] L{level+1} @ ${execution_price:,.0f}, size={size:.4f} BTC, holdings={self.holdings:.4f}, long_positions_count={len(self.long_positions)}, cost_basis=${self.total_cost_basis:,.0f}")
+                    print(f"[TRADE_RECORD] SELL L{level+1} @ ${execution_price:,.0f} - recorded {len(matched_trades)} matched trades (total trades now: {len(self.trades)})")
+                    if len(matched_trades) == 0:
+                        print(f"[WARNING] SELL L{level+1} executed but no trades recorded! This should not happen.")
 
                 self.orders.append({
                     'timestamp': timestamp,
@@ -824,6 +874,8 @@ def main():
         # Temporarily disable MM risk zone to test basic trading logic
         # After verifying basic functionality works, re-enable with adjusted thresholds
         enable_mm_risk_zone=False,
+        # Enable console log for filled_levels debugging
+        enable_console_log=True,
     )
 
     # Run backtest

@@ -241,6 +241,10 @@ class TaoGridLeanAlgorithm:
         if triggered_order is None:
             # No limit order triggered, save current price for next bar
             self._prev_price = current_price
+            # Log when no order is triggered (only occasionally to avoid spam)
+            if getattr(self.config, "enable_console_log", False) and getattr(self, "_current_bar_index", 0) % 1000 == 0:
+                pending_count = len(self.grid_manager.pending_limit_orders)
+                print(f"[ORDER_TRIGGER] Bar {getattr(self, '_current_bar_index', 0)} @ {current_time}: No order triggered (pending_orders={pending_count}, price=${current_price:,.0f})")
             return None  # No trigger, do nothing
 
         direction = triggered_order['direction']
@@ -283,6 +287,10 @@ class TaoGridLeanAlgorithm:
                 f"[{current_time}] Order blocked - {direction.upper()} L{level_index+1} "
                 f"@ ${level_price:,.0f}: {throttle_status.reason}"
             )
+            # Additional debug log
+            if getattr(self.config, "enable_console_log", False):
+                inventory_state = self.grid_manager.get_inventory_state()
+                print(f"[ORDER_BLOCKED] {direction.upper()} L{level_index+1} @ ${level_price:,.0f} - reason: {throttle_status.reason}, inventory: long={inventory_state['long_exposure']:.4f}, holdings={portfolio_state.get('holdings', 0):.4f}")
             # Reset triggered flag so limit order can trigger again later
             # (when throttle conditions improve)
             triggered_order['triggered'] = False
@@ -329,6 +337,10 @@ class TaoGridLeanAlgorithm:
             "minutes_to_funding": minutes_to_funding,
             "vol_score": vol_score,
         }
+        
+        # Log order creation
+        if getattr(self.config, "enable_console_log", False):
+            print(f"[ORDER_CREATED] {direction.upper()} L{level_index+1} @ ${level_price:,.0f}, size={size:.4f} BTC, inventory: long={inventory_state['long_exposure']:.4f}, holdings={portfolio_state.get('holdings', 0):.4f}")
         
         # Save current price for next bar (for cross detection)
         self._prev_price = current_price
