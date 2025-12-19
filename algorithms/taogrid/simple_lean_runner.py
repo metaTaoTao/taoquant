@@ -45,6 +45,16 @@ class SimpleLeanRunner:
         verbose: bool = True,
         progress_every: int = 100,
         collect_equity_detail: bool = True,
+        # Execution-model knobs (default keeps legacy behavior)
+        max_fills_per_bar: int = 1,
+        # --- "保换手 + 异常分钟抑制买入爆发" ---
+        active_buy_levels: int | None = None,         # 常态同时挂出的买单层数 N（例如 6）
+        cooldown_minutes: int = 0,                    # 异常后冷却分钟数（例如 2）
+        abnormal_buy_fills_trigger: int = 0,          # 异常触发：当分钟买入成交次数 >= 2
+        abnormal_total_fills_trigger: int = 0,        # 异常触发：当分钟总成交次数 >= 3
+        abnormal_buy_notional_frac_equity: float = 0.0,  # 异常触发：当分钟新增买入 notional >= x * equity（例如 0.03）
+        abnormal_range_mult_spacing: float = 0.0,     # 异常触发：振幅 >= k * spacing（例如 4）
+        cooldown_active_buy_levels: int = 0,          # 冷却期仅保留的买单层数（例如 2）
     ):
         """Initialize runner with config."""
         self.config = config
@@ -57,6 +67,17 @@ class SimpleLeanRunner:
         self.verbose = verbose
         self.progress_every = max(1, int(progress_every))
         self.collect_equity_detail = bool(collect_equity_detail)
+        self.max_fills_per_bar = max(1, int(max_fills_per_bar))
+        self.active_buy_levels = None if active_buy_levels is None else max(0, int(active_buy_levels))
+        self.cooldown_minutes = max(0, int(cooldown_minutes))
+        self.abnormal_buy_fills_trigger = max(0, int(abnormal_buy_fills_trigger))
+        self.abnormal_total_fills_trigger = max(0, int(abnormal_total_fills_trigger))
+        self.abnormal_buy_notional_frac_equity = float(abnormal_buy_notional_frac_equity)
+        self.abnormal_range_mult_spacing = float(abnormal_range_mult_spacing)
+        self.cooldown_active_buy_levels = max(0, int(cooldown_active_buy_levels))
+        # internal cooldown state
+        self._buy_cooldown_until: datetime | None = None
+        self._spacing_pct_est: float | None = None
 
         self.algorithm = TaoGridLeanAlgorithm(config)
 
@@ -110,6 +131,66 @@ class SimpleLeanRunner:
         if self.verbose:
             print(f"  Loaded {len(data)} bars from {data.index[0]} to {data.index[-1]}")
         return data
+
+    def _ensure_spacing_estimate(self) -> None:
+        """Estimate grid spacing pct from current grid levels (best-effort)."""
+        if self._spacing_pct_est is not None:
+            return
+        gm = self.algorithm.grid_manager
+        if gm.buy_levels is None or gm.sell_levels is None:
+            return
+        if len(gm.buy_levels) == 0 or len(gm.sell_levels) == 0:
+            return
+        i = 0
+        buy = float(gm.buy_levels[i])
+        sell = float(gm.sell_levels[i])
+        if buy > 0 and sell > 0:
+            self._spacing_pct_est = max(0.0, (sell / buy) - 1.0)
+
+    def _apply_active_buy_levels_filter(self, current_price: float, keep_levels: int) -> None:
+        """
+        Keep only the nearest `keep_levels` BUY pending orders (below current price).
+
+        This is an execution-layer risk control: reduce simultaneous exposure to many buy levels
+        while keeping SELL orders intact to preserve de-inventory / churn.
+        """
+        if keep_levels <= 0:
+            return
+
+        gm = self.algorithm.grid_manager
+        pending = gm.pending_limit_orders
+        if not pending:
+            return
+
+        # IMPORTANT:
+        # Do NOT delete orders from pending_limit_orders; that would permanently remove them and kill turnover.
+        # Instead, flip their `placed` flag (enable/disable) so they can be re-enabled later.
+
+        buy_orders = [o for o in pending if o.get("direction") == "buy"]
+        if not buy_orders:
+            return
+
+        # Eligible BUY orders for placement are those below/at current price (true limit order)
+        eligible = [o for o in buy_orders if float(o.get("price", 0.0)) <= float(current_price)]
+        if len(eligible) <= keep_levels:
+            # Enable all eligible, disable ineligible (above market)
+            for o in buy_orders:
+                o["placed"] = float(o.get("price", 0.0)) <= float(current_price)
+                if not o["placed"]:
+                    o["triggered"] = False
+            return
+
+        # Sort eligible by distance to current price (closest first), keep top N
+        eligible_sorted = sorted(eligible, key=lambda o: abs(float(current_price) - float(o.get("price", 0.0))))
+        keep_ids = {(o.get("direction"), o.get("level_index")) for o in eligible_sorted[:keep_levels]}
+
+        # Enable kept orders; disable the rest (and clear triggered state)
+        for o in buy_orders:
+            oid = (o.get("direction"), o.get("level_index"))
+            is_eligible = float(o.get("price", 0.0)) <= float(current_price)
+            o["placed"] = bool(is_eligible and oid in keep_ids)
+            if not o["placed"]:
+                o["triggered"] = False
 
     def run(self) -> dict:
         """Run backtest."""
@@ -246,6 +327,9 @@ class SimpleLeanRunner:
             print("Running backtest...")
         print()
 
+        # Estimate spacing once grid is ready
+        self._ensure_spacing_estimate()
+
         for i, (timestamp, row) in enumerate(data.iterrows()):
             if self.verbose and i % self.progress_every == 0:
                 print(f"  Processing bar {i}/{len(data)} ({i/len(data)*100:.1f}%)", end="\r")
@@ -291,6 +375,24 @@ class SimpleLeanRunner:
                 'holdings': self.holdings,
                 'unrealized_pnl': unrealized_pnl,
             }
+
+            # Execution-layer policy: active BUY levels + abnormal-minute cooldown
+            in_cooldown = self._buy_cooldown_until is not None and timestamp < self._buy_cooldown_until
+            if self.active_buy_levels is not None and self.active_buy_levels > 0:
+                keep_n = self.cooldown_active_buy_levels if in_cooldown and self.cooldown_active_buy_levels > 0 else self.active_buy_levels
+                self._apply_active_buy_levels_filter(current_price=float(row["close"]), keep_levels=int(keep_n))
+
+            # Abnormal range trigger (optional): use spacing estimate
+            bar_range_pct = (float(row["high"]) - float(row["low"])) / float(row["close"]) if float(row["close"]) > 0 else 0.0
+            spacing_pct = float(self._spacing_pct_est) if self._spacing_pct_est is not None else 0.0
+            range_abnormal = (
+                self.abnormal_range_mult_spacing > 0
+                and spacing_pct > 0
+                and bar_range_pct >= float(self.abnormal_range_mult_spacing) * spacing_pct
+            )
+            if range_abnormal and self.cooldown_minutes > 0 and not in_cooldown:
+                self._buy_cooldown_until = timestamp + pd.Timedelta(minutes=int(self.cooldown_minutes))
+                in_cooldown = True
             
             # Debug logging around shutdown time (first hour only, to avoid spam)
             if (self.verbose and 
@@ -302,42 +404,91 @@ class SimpleLeanRunner:
                       f"cost_basis=${self.total_cost_basis:,.2f} unrealized_pnl=${unrealized_pnl:,.2f} "
                       f"({unrealized_pnl_pct:.2%}) price=${row['close']:,.2f}")
 
-            # Process with TaoGrid algorithm
-            order = self.algorithm.on_data(timestamp, bar_data, portfolio_state)
+            # Process with TaoGrid algorithm (allow multiple fills per bar, bounded)
+            fills_this_bar = 0
+            buy_fills_this_bar = 0
+            buy_notional_added_this_bar = 0.0
+            # Abnormal trigger notional threshold is defined in equity terms (NOT multiplied by leverage)
+            buy_notional_abnormal_threshold = (
+                max(0.0, float(self.abnormal_buy_notional_frac_equity)) * float(current_equity)
+                if self.abnormal_buy_notional_frac_equity > 0 and float(current_equity) > 0
+                else None
+            )
 
-            # Execute orders (on_data returns order dict directly, or None)
-            if order:
+            while fills_this_bar < self.max_fills_per_bar:
+                order = self.algorithm.on_data(timestamp, bar_data, portfolio_state)
+                if not order:
+                    break
+
+                # If in cooldown, do not allow new BUY executions (SELL is allowed)
+                if in_cooldown and order["direction"] == "buy":
+                    self.algorithm.grid_manager.reset_triggered_orders()
+                    break
+
                 # Log order received
                 if getattr(self.config, "enable_console_log", False):
-                    print(f"[ORDER_EXECUTE] Received {order['direction'].upper()} L{order['level']+1} @ ${order['price']:,.0f}, size={order['quantity']:.4f} BTC")
-                
+                    print(
+                        f"[ORDER_EXECUTE] Received {order['direction'].upper()} "
+                        f"L{order['level']+1} @ ${order['price']:,.0f}, size={order['quantity']:.4f} BTC"
+                    )
+
                 executed = self.execute_order(order, bar_open=row['open'], market_price=row['close'], timestamp=timestamp)
 
-                # Update grid manager inventory if order was executed
                 if executed:
+                    fills_this_bar += 1
+                    if order["direction"] == "buy":
+                        buy_fills_this_bar += 1
+                        buy_notional_added_this_bar += float(order["quantity"]) * float(order["price"])
+
                     if getattr(self.config, "enable_console_log", False):
                         print(f"[ORDER_EXECUTE] {order['direction'].upper()} L{order['level']+1} EXECUTED successfully")
-                else:
-                    if getattr(self.config, "enable_console_log", False):
-                        print(f"[ORDER_EXECUTE] {order['direction'].upper()} L{order['level']+1} FAILED to execute")
-                    # For buy orders, add to grid manager positions first
-                    if order['direction'] == 'buy':
-                        self.algorithm.grid_manager.add_buy_position(
-                            buy_level_index=order['level'],
-                            size=order['quantity'],
-                            buy_price=order['price']
-                        )
-                    
-                    # Call on_order_filled to update grid state and place new limit orders
+
+                    # Update grid state and place new limit orders
                     self.algorithm.on_order_filled(order)
-                    
-                    # For sell orders, match against grid positions using grid pairing
+
+                    # Keep grid_manager state consistent for trade recording
                     if order['direction'] == 'sell':
-                        match_result = self.algorithm.grid_manager.match_sell_order(
+                        _ = self.algorithm.grid_manager.match_sell_order(
                             sell_level_index=order['level'],
                             sell_size=order['quantity']
                         )
-                        # match_result is used for trade recording in execute_order
+
+                    # Refresh portfolio_state for possible next fill in the same bar
+                    current_equity = self.cash + (self.holdings * row['close'])
+                    current_value = self.holdings * row['close']
+                    unrealized_pnl = current_value - self.total_cost_basis
+                    portfolio_state = {
+                        'equity': current_equity,
+                        'cash': self.cash,
+                        'holdings': self.holdings,
+                        'unrealized_pnl': unrealized_pnl,
+                    }
+
+                    # Check abnormal-minute triggers and enter cooldown (BUY only)
+                    if self.cooldown_minutes > 0 and not in_cooldown:
+                        abnormal_by_count = (
+                            (self.abnormal_buy_fills_trigger > 0 and buy_fills_this_bar >= self.abnormal_buy_fills_trigger)
+                            or (self.abnormal_total_fills_trigger > 0 and fills_this_bar >= self.abnormal_total_fills_trigger)
+                        )
+                        abnormal_by_notional = (
+                            buy_notional_abnormal_threshold is not None
+                            and buy_notional_added_this_bar >= float(buy_notional_abnormal_threshold)
+                        )
+                        if abnormal_by_count or abnormal_by_notional or range_abnormal:
+                            self._buy_cooldown_until = timestamp + pd.Timedelta(minutes=int(self.cooldown_minutes))
+                            in_cooldown = True
+                            # Apply stricter buy-level filter immediately for remainder of this bar
+                            if self.active_buy_levels is not None and self.cooldown_active_buy_levels > 0:
+                                self._apply_active_buy_levels_filter(
+                                    current_price=float(row["close"]),
+                                    keep_levels=int(self.cooldown_active_buy_levels),
+                                )
+                else:
+                    # Release trigger so it can be evaluated next bar
+                    self.algorithm.grid_manager.reset_triggered_orders()
+                    if getattr(self.config, "enable_console_log", False):
+                        print(f"[ORDER_EXECUTE] {order['direction'].upper()} L{order['level']+1} FAILED to execute")
+                    break
 
             # Record equity
             if self.collect_equity_detail:
@@ -451,11 +602,8 @@ class SimpleLeanRunner:
                 # Log buy execution
                 if getattr(self.config, "enable_console_log", False):
                     print(f"[BUY_EXECUTED] L{level+1} @ ${execution_price:,.0f}, size={size:.4f} BTC, holdings={self.holdings:.4f}, long_positions_count={len(self.long_positions)}, cost_basis=${self.total_cost_basis:,.0f}")
-            else:
-                # Log buy rejection
-                if getattr(self.config, "enable_console_log", False):
-                    print(f"[BUY_REJECTED] L{level+1} @ ${execution_price:,.0f}, size={size:.4f} BTC - leverage constraint: new_notional=${new_notional:,.0f} > max_notional=${max_notional:,.0f} (equity=${equity:,.0f}, leverage={self.config.leverage}x)")
 
+                # Record buy order to orders list
                 self.orders.append({
                     'timestamp': timestamp,
                     'direction': 'buy',
@@ -476,7 +624,13 @@ class SimpleLeanRunner:
                     'vol_score': float(order.get('vol_score')) if order.get('vol_score') is not None else np.nan,
                 })
 
-                return True  # Order executed
+                return True  # Order executed successfully
+            else:
+                # Log buy rejection
+                if getattr(self.config, "enable_console_log", False):
+                    print(f"[BUY_REJECTED] L{level+1} @ ${execution_price:,.0f}, size={size:.4f} BTC - leverage constraint: new_notional=${new_notional:,.0f} > max_notional=${max_notional:,.0f} (equity=${equity:,.0f}, leverage={self.config.leverage}x)")
+
+                return False  # Order NOT executed (rejected due to leverage constraint)
 
         elif direction == 'sell':
             # Sell BTC - Match against long positions using GRID PAIRING
@@ -512,7 +666,7 @@ class SimpleLeanRunner:
                             print(f"[SELL_MATCH_FIFO] Grid pairing failed for SELL L{level+1}, falling back to FIFO (remaining_size={remaining_sell_size:.4f}, long_positions_count={len(self.long_positions)})")
                         if not self.long_positions:
                             if getattr(self.config, "enable_console_log", False):
-                                print(f"[SELL_MATCH_FIFO] No long positions available for FIFO matching")
+                                print("[SELL_MATCH_FIFO] No long positions available for FIFO matching")
                             break  # No positions to match
                         
                         # FIFO: match against first position in queue
@@ -557,7 +711,9 @@ class SimpleLeanRunner:
                     
                     # Calculate PnL for this matched trade
                     sell_proceeds_portion = (matched_size / size) * net_proceeds
-                    sell_cost_portion = (matched_size / size) * (commission + slippage)
+                    # Note: we keep this for diagnostics parity, but it is not used in PnL
+                    # (PnL is computed using net_proceeds and buy_cost_portion).
+                    # sell_cost_portion = (matched_size / size) * (commission + slippage)
                     buy_cost_portion = (matched_size / buy_size) * buy_cost
                     
                     # Track cost basis reduction (based on entry price, not entry_cost which includes fees)

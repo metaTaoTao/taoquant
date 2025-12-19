@@ -428,10 +428,11 @@ class GridManager:
                 order['last_checked_bar'] = None
     
     def place_pending_order(
-        self, 
-        direction: str, 
-        level_index: int, 
-        level_price: float
+        self,
+        direction: str,
+        level_index: int,
+        level_price: float,
+        bar_index: Optional[int] = None,
     ) -> None:
         """
         Place a new pending limit order after a position is filled.
@@ -462,7 +463,11 @@ class GridManager:
             'price': level_price,
             'size': None,  # Will be calculated when triggered
             'placed': True,
-            'last_checked_bar': None,  # Track which bar we last checked
+            # IMPORTANT:
+            # If this order is created during processing of bar `bar_index`,
+            # set last_checked_bar=bar_index to prevent it from triggering
+            # in the SAME bar (more realistic for event-driven execution).
+            'last_checked_bar': bar_index,
         })
         
         # Log order placement

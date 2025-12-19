@@ -23,6 +23,8 @@ class DataManager:
         "binance": ("data.sources.binance_sdk", "BinanceSDKDataSource"),
         "okx_sdk": ("data.sources.okx_sdk", "OkxSDKDataSource"),
         "binance_sdk": ("data.sources.binance_sdk", "BinanceSDKDataSource"),
+        "bitget": ("data.sources.bitget_sdk", "BitgetSDKDataSource"),
+        "bitget_sdk": ("data.sources.bitget_sdk", "BitgetSDKDataSource"),
     }
 
     def __init__(self, config: Optional[Any] = None) -> None:

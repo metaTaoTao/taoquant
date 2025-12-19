@@ -1,0 +1,214 @@
+"""
+Bitget Live Trading Runner - Command Line Interface.
+
+Usage:
+    python algorithms/taogrid/run_bitget_live.py \
+        --symbol BTCUSDT \
+        --api-key YOUR_API_KEY \
+        --api-secret YOUR_API_SECRET \
+        --passphrase YOUR_PASSPHRASE \
+        --subaccount-uid SUBACCOUNT_UID
+
+    # Dry run mode
+    python algorithms/taogrid/run_bitget_live.py \
+        --symbol BTCUSDT \
+        --dry-run \
+        --api-key YOUR_API_KEY \
+        --api-secret YOUR_API_SECRET \
+        --passphrase YOUR_PASSPHRASE
+
+    # With config file
+    python algorithms/taogrid/run_bitget_live.py \
+        --symbol BTCUSDT \
+        --config-file config.json \
+        --api-key YOUR_API_KEY \
+        --api-secret YOUR_API_SECRET \
+        --passphrase YOUR_PASSPHRASE
+"""
+
+from __future__ import annotations
+
+import sys
+import json
+import argparse
+from pathlib import Path
+
+# Add project root to path
+project_root = Path(__file__).parent.parent.parent
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
+
+from algorithms.taogrid.bitget_live_runner import BitgetLiveRunner
+from algorithms.taogrid.config import TaoGridLeanConfig
+
+
+def load_config_from_file(config_file: str) -> TaoGridLeanConfig:
+    """
+    Load configuration from JSON file.
+
+    Parameters
+    ----------
+    config_file : str
+        Path to config file
+
+    Returns
+    -------
+    TaoGridLeanConfig
+        Configuration object
+    """
+    config_path = Path(config_file)
+    if not config_path.exists():
+        raise FileNotFoundError(f"Config file not found: {config_file}")
+
+    with open(config_path, "r", encoding="utf-8") as f:
+        config_data = json.load(f)
+
+    # Extract strategy config
+    strategy_config = config_data.get("strategy", {})
+    execution_config = config_data.get("execution", {})
+
+    # Create config object
+    config = TaoGridLeanConfig(
+        name=strategy_config.get("name", "TaoGrid Live"),
+        support=float(strategy_config.get("support", 104000.0)),
+        resistance=float(strategy_config.get("resistance", 126000.0)),
+        regime=strategy_config.get("regime", "NEUTRAL_RANGE"),
+        grid_layers_buy=int(strategy_config.get("grid_layers_buy", 5)),
+        grid_layers_sell=int(strategy_config.get("grid_layers_sell", 5)),
+        initial_cash=float(strategy_config.get("initial_cash", 1000.0)),
+        # Add other config parameters as needed
+    )
+
+    return config
+
+
+def main():
+    """Main entry point."""
+    parser = argparse.ArgumentParser(
+        description="Bitget Live Trading Runner for TaoGrid Strategy",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Basic usage
+  python run_bitget_live.py --symbol BTCUSDT \\
+      --api-key YOUR_KEY --api-secret YOUR_SECRET --passphrase YOUR_PASSPHRASE
+
+  # Dry run mode
+  python run_bitget_live.py --symbol BTCUSDT --dry-run \\
+      --api-key YOUR_KEY --api-secret YOUR_SECRET --passphrase YOUR_PASSPHRASE
+
+  # With subaccount
+  python run_bitget_live.py --symbol BTCUSDT \\
+      --api-key YOUR_KEY --api-secret YOUR_SECRET --passphrase YOUR_PASSPHRASE \\
+      --subaccount-uid SUBACCOUNT_UID
+
+  # With config file
+  python run_bitget_live.py --symbol BTCUSDT --config-file config.json \\
+      --api-key YOUR_KEY --api-secret YOUR_SECRET --passphrase YOUR_PASSPHRASE
+        """,
+    )
+
+    # Required arguments
+    parser.add_argument(
+        "--symbol",
+        required=True,
+        help="Trading symbol (e.g., BTCUSDT)",
+    )
+
+    parser.add_argument(
+        "--api-key",
+        required=True,
+        help="Bitget API Key",
+    )
+
+    parser.add_argument(
+        "--api-secret",
+        required=True,
+        help="Bitget API Secret",
+    )
+
+    parser.add_argument(
+        "--passphrase",
+        required=True,
+        help="Bitget API Passphrase",
+    )
+
+    # Optional arguments
+    parser.add_argument(
+        "--subaccount-uid",
+        help="Subaccount UID (optional)",
+    )
+
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Dry run mode - don't place actual orders",
+    )
+
+    parser.add_argument(
+        "--config-file",
+        help="Path to strategy config file (JSON)",
+    )
+
+    parser.add_argument(
+        "--log-dir",
+        default="logs/bitget_live",
+        help="Log directory (default: logs/bitget_live)",
+    )
+
+    args = parser.parse_args()
+
+    # Load configuration
+    try:
+        if args.config_file:
+            print(f"Loading configuration from {args.config_file}...")
+            config = load_config_from_file(args.config_file)
+        else:
+            print("Using default configuration...")
+            config = TaoGridLeanConfig(
+                name="TaoGrid Live (Bitget)",
+                support=104000.0,
+                resistance=126000.0,
+                regime="NEUTRAL_RANGE",
+            )
+    except Exception as e:
+        print(f"Error loading configuration: {e}")
+        sys.exit(1)
+
+    # Create runner
+    try:
+        print("\n" + "=" * 80)
+        print("Bitget Live Trading Runner")
+        print("=" * 80)
+        print(f"Symbol: {args.symbol}")
+        print(f"Dry Run: {args.dry_run}")
+        if args.subaccount_uid:
+            print(f"Subaccount UID: {args.subaccount_uid}")
+        print("=" * 80 + "\n")
+
+        runner = BitgetLiveRunner(
+            config=config,
+            symbol=args.symbol,
+            bitget_api_key=args.api_key,
+            bitget_api_secret=args.api_secret,
+            bitget_passphrase=args.passphrase,
+            subaccount_uid=args.subaccount_uid,
+            dry_run=args.dry_run,
+            log_dir=args.log_dir,
+        )
+
+        # Run
+        runner.run()
+
+    except KeyboardInterrupt:
+        print("\n\nStopped by user")
+        sys.exit(0)
+    except Exception as e:
+        print(f"\n\nError: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

@@ -5,14 +5,14 @@
   "sharpe_ratio": 6.802095011576649,
   "sortino_ratio": 25.960806413146564,
   "sharpe_annualization_days": 365,
-  "total_trades": 1274,
-  "winning_trades": 891.0,
-  "losing_trades": 383.0,
-  "win_rate": 0.6993720565149136,
-  "avg_win": 134.46199110656053,
-  "avg_loss": -236.29734442698037,
-  "profit_factor": 1.3237916186535201,
+  "total_trades": 1256,
+  "winning_trades": 767.0,
+  "losing_trades": 489.0,
+  "win_rate": 0.6106687898089171,
+  "avg_win": 155.7522417689484,
+  "avg_loss": -196.9825388840979,
+  "profit_factor": 1.2402038647163256,
   "final_equity": 162287.7448365529,
-  "avg_holding_period_hours": 11.899777603349033,
-  "avg_return_per_trade": -0.00043533276953089183
+  "avg_holding_period_hours": 13.347890127388533,
+  "avg_return_per_trade": -0.0010940655310299125
 }

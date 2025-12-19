@@ -379,7 +379,12 @@ class TaoGridLeanAlgorithm:
             target_sell_level = level  # buy[i] -> sell[i] (1x spacing)
             if self.grid_manager.sell_levels is not None and target_sell_level < len(self.grid_manager.sell_levels):
                 target_sell_price = self.grid_manager.sell_levels[target_sell_level]
-                self.grid_manager.place_pending_order('sell', target_sell_level, target_sell_price)
+                self.grid_manager.place_pending_order(
+                    'sell',
+                    target_sell_level,
+                    target_sell_price,
+                    bar_index=getattr(self, "_current_bar_index", None),
+                )
                 self._log(f"  Placed sell limit order at L{target_sell_level+1} @ ${target_sell_price:,.0f}")
             # IMPORTANT (inventory-aware grid):
             # Do NOT immediately re-place the same buy order after a buy fill.
@@ -392,7 +397,12 @@ class TaoGridLeanAlgorithm:
             # Since sell[i] is paired with buy[i], we place buy order at buy[i]
             if self.grid_manager.buy_levels is not None and level < len(self.grid_manager.buy_levels):
                 buy_level_price = self.grid_manager.buy_levels[level]
-                self.grid_manager.place_pending_order('buy', level, buy_level_price)
+                self.grid_manager.place_pending_order(
+                    'buy',
+                    level,
+                    buy_level_price,
+                    bar_index=getattr(self, "_current_bar_index", None),
+                )
                 self._log(f"  Placed buy limit order at L{level+1} @ ${buy_level_price:,.0f} (re-entry)")
 
         # Track filled order

@@ -1,0 +1,157 @@
+"""
+检查inventory同步问题。
+"""
+
+import sys
+import io
+from pathlib import Path
+from datetime import datetime, timezone
+
+# Set UTF-8 encoding for stdout
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+
+# Add project root
+project_root = Path(__file__).parent.parent
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
+
+from algorithms.taogrid.simple_lean_runner import SimpleLeanRunner
+from algorithms.taogrid.config import TaoGridLeanConfig
+
+def main():
+    config = TaoGridLeanConfig(
+        support=107000.0,
+        resistance=123000.0,
+        grid_layers_buy=40,
+        grid_layers_sell=40,
+        min_return=0.0012,
+        maker_fee=0.0002,
+        volatility_k=0.0,
+        leverage=50.0,
+        enable_console_log=False,
+    )
+    
+    # 只运行前1000根K线，便于分析
+    runner = SimpleLeanRunner(
+        config=config,
+        symbol="BTCUSDT",
+        timeframe="1m",
+        start_date=datetime(2025, 9, 26, tzinfo=timezone.utc),
+        end_date=datetime(2025, 9, 26, 17, 0, tzinfo=timezone.utc),
+        verbose=False,
+    )
+    
+    data = runner.load_data()
+    
+    # 手动运行，记录inventory状态
+    historical_data = data.head(100)
+    runner.algorithm.initialize(
+        'BTCUSDT',
+        datetime(2025, 9, 26, tzinfo=timezone.utc),
+        datetime(2025, 9, 26, 17, 0, tzinfo=timezone.utc),
+        historical_data
+    )
+    
+    inventory_sync_issues = []
+    
+    for i, (timestamp, row) in enumerate(data.iterrows()):
+        if i < 100:
+            continue
+        if i >= 1100:
+            break
+        
+        # 准备数据
+        bar_data = {
+            'open': row['open'],
+            'high': row['high'],
+            'low': row['low'],
+            'close': row['close'],
+            'volume': row['volume'],
+            'trend_score': row.get('trend_score', 0.0),
+            'mr_z': row.get('mr_z', 0.0),
+            'breakout_risk_down': row.get('breakout_risk_down', 0.0),
+            'breakout_risk_up': row.get('breakout_risk_up', 0.0),
+            'range_pos': row.get('range_pos', 0.5),
+            'vol_score': row.get('vol_score', 0.0),
+            'funding_rate': row.get('funding_rate', 0.0),
+            'minutes_to_funding': row.get('minutes_to_funding', 0.0),
+        }
+        
+        current_equity = runner.cash + (runner.holdings * row['close'])
+        current_value = runner.holdings * row['close']
+        unrealized_pnl = current_value - runner.total_cost_basis
+        portfolio_state = {
+            'equity': current_equity,
+            'cash': runner.cash,
+            'holdings': runner.holdings,
+            'unrealized_pnl': unrealized_pnl,
+        }
+        
+        # 检查inventory同步
+        inventory_state = runner.algorithm.grid_manager.inventory_tracker.get_state()
+        holdings_btc = runner.holdings
+        # NOTE: long_exposure is already in BTC (base currency units), not notional value
+        long_exposure_btc = inventory_state.long_exposure
+        
+        if abs(holdings_btc - long_exposure_btc) > 0.001:
+            inventory_sync_issues.append({
+                'bar': i,
+                'timestamp': timestamp,
+                'holdings': holdings_btc,
+                'long_exposure_btc': long_exposure_btc,
+                'diff': holdings_btc - long_exposure_btc,
+            })
+        
+        # 处理订单
+        runner.algorithm._current_bar_index = i
+        
+        # 循环处理所有订单
+        max_orders_per_bar = 20
+        orders_processed_this_bar = 0
+        
+        while orders_processed_this_bar < max_orders_per_bar:
+            # 更新portfolio_state
+            current_equity = runner.cash + (runner.holdings * row['close'])
+            current_value = runner.holdings * row['close']
+            unrealized_pnl = current_value - runner.total_cost_basis
+            portfolio_state = {
+                'equity': current_equity,
+                'cash': runner.cash,
+                'holdings': runner.holdings,
+                'unrealized_pnl': unrealized_pnl,
+            }
+            
+            order = runner.algorithm.on_data(timestamp, bar_data, portfolio_state)
+            
+            if order:
+                orders_processed_this_bar += 1
+                executed = runner.execute_order(order, row['open'], row['close'], timestamp)
+                if executed:
+                    runner.algorithm.on_order_filled(order)
+            else:
+                break
+        
+        runner.cash = portfolio_state['cash']
+        runner.holdings = portfolio_state['holdings']
+    
+    print("=" * 80)
+    print("Inventory同步检查")
+    print("=" * 80)
+    print(f"Inventory不同步的次数: {len(inventory_sync_issues)}")
+    
+    if inventory_sync_issues:
+        print(f"\n前10个不同步的情况:")
+        for i, issue in enumerate(inventory_sync_issues[:10]):
+            print(f"  {i+1}. Bar {issue['bar']} @ {issue['timestamp']}")
+            print(f"     holdings: {issue['holdings']:.4f}, long_exposure_btc: {issue['long_exposure_btc']:.4f}, diff: {issue['diff']:.4f}")
+    
+    print(f"\n最终状态:")
+    print(f"  holdings: {runner.holdings:.4f}")
+    inventory_state = runner.algorithm.grid_manager.inventory_tracker.get_state()
+    print(f"  long_exposure (BTC): {inventory_state.long_exposure:.4f}")
+    print(f"  long_exposure (notional): ${inventory_state.long_exposure * row['close']:.2f}" if row['close'] > 0 else "N/A")
+    print(f"  交易数: {len(runner.trades)}")
+
+if __name__ == "__main__":
+    main()
+
