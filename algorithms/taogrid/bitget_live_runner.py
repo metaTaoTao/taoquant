@@ -105,16 +105,18 @@ class BitgetLiveRunner:
         self.logger.log_info("Initializing TaoGrid Strategy")
         self.logger.log_info("=" * 80)
 
-        # Get historical data for grid setup (last 7 days)
+        # Get historical data for grid setup (use 1m to match backtest)
+        # Use 30 days to get more stable ATR calculation
         end_date = datetime.now(timezone.utc)
-        start_date = end_date - timedelta(days=7)
+        start_date = end_date - timedelta(days=30)
 
         self.logger.log_info(f"Fetching historical data from {start_date} to {end_date}...")
+        self.logger.log_info("Using 1m timeframe to match backtest")
 
         try:
             historical_data = self.data_source.get_klines(
                 symbol=self.symbol,
-                timeframe="1m",
+                timeframe="1m",  # Match backtest timeframe
                 start=start_date,
                 end=end_date,
             )
@@ -139,7 +141,7 @@ class BitgetLiveRunner:
             self.logger.log_error(f"Failed to initialize strategy: {e}", exc_info=True)
             raise
 
-    def _get_portfolio_state(self) -> Dict[str, Any]:
+    def _get_portfolio_state(self, current_price: float) -> Dict[str, Any]:
         """
         Get current portfolio state.
 
@@ -153,8 +155,8 @@ class BitgetLiveRunner:
             positions = self.execution_engine.get_positions(self.symbol)
 
             # Calculate total equity
-            total_equity = balance.get("total_equity", 0.0)
-            available_balance = balance.get("available_balance", 0.0)
+            available_balance = float(balance.get("available_balance", 0.0) or 0.0)
+            frozen_balance = float(balance.get("frozen_balance", 0.0) or 0.0)
 
             # Get holdings for the symbol
             holdings = 0.0
@@ -162,6 +164,10 @@ class BitgetLiveRunner:
                 if pos.get("symbol") == self.symbol or pos.get("currency") == self.symbol.replace("USDT", ""):
                     holdings = pos.get("quantity", 0.0)
                     break
+
+            # Spot equity approximation in USDT:
+            # equity ~= USDT_cash + base_holdings * current_price
+            total_equity = (available_balance + frozen_balance) + float(holdings or 0.0) * float(current_price)
 
             # Calculate unrealized PnL (simplified - would need current price)
             unrealized_pnl = 0.0
@@ -248,7 +254,7 @@ class BitgetLiveRunner:
         try:
             while True:
                 try:
-                    # Get latest bar
+                    # Get latest bar (use 1m to match grid calculation timeframe)
                     latest_bar = self.data_source.get_latest_bar(self.symbol, "1m")
 
                     if latest_bar is None:
@@ -268,7 +274,7 @@ class BitgetLiveRunner:
                     self.last_bar_timestamp = bar_timestamp
 
                     # Get portfolio state
-                    portfolio_state = self._get_portfolio_state()
+                    portfolio_state = self._get_portfolio_state(current_price=float(latest_bar["close"]))
 
                     # Log portfolio state periodically
                     self.logger.log_portfolio(
@@ -290,8 +296,8 @@ class BitgetLiveRunner:
                         "volume": latest_bar["volume"],
                     }
 
-                    # Set current bar index for algorithm
-                    self.algorithm._current_bar_index = None  # Not used in live trading
+                    # Set current bar index for algorithm (use 0 for live trading)
+                    self.algorithm._current_bar_index = 0  # Live trading doesn't use bar index
 
                     # Call strategy
                     order_signal = self.algorithm.on_data(

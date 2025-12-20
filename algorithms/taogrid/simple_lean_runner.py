@@ -662,6 +662,24 @@ class SimpleLeanRunner:
                     if match_result is None:
                         # Grid pairing failed - fall back to FIFO matching from long_positions
                         # This ensures cost_basis is always updated, even if grid pairing logic has issues
+                        # DEBUG: Log why grid pairing failed
+                        if True:  # Always log for debugging
+                            # Show what buy positions exist
+                            buy_positions_summary = []
+                            for buy_idx, positions in self.algorithm.grid_manager.buy_positions.items():
+                                for pos in positions:
+                                    target = pos.get('target_sell_level', -1)
+                                    buy_positions_summary.append(f"Buy[{buy_idx}]→Sell[{target}]")
+
+                            if not hasattr(self, '_match_failures'):
+                                self._match_failures = []
+                            self._match_failures.append({
+                                'timestamp': timestamp,
+                                'sell_level': level,
+                                'available_buy_positions': buy_positions_summary[:10],  # First 10
+                                'total_buy_positions': sum(len(p) for p in self.algorithm.grid_manager.buy_positions.values())
+                            })
+
                         if getattr(self.config, "enable_console_log", False):
                             print(f"[SELL_MATCH_FIFO] Grid pairing failed for SELL L{level+1}, falling back to FIFO (remaining_size={remaining_sell_size:.4f}, long_positions_count={len(self.long_positions)})")
                         if not self.long_positions:
@@ -687,9 +705,13 @@ class SimpleLeanRunner:
                         buy_level_idx, buy_price, matched_size = match_result
                         
                         # Find corresponding position in long_positions
+                        # Note: execution_price may differ from grid_level_price due to favorable fills
+                        # (e.g., buy limit at $98,834 but bar opened at $98,800 -> filled at $98,800)
+                        # So we use a reasonable tolerance (~0.1% or $100 for BTC prices)
                         buy_pos = None
+                        price_tolerance = max(100.0, buy_price * 0.001)  # 0.1% or $100, whichever is larger
                         for pos in self.long_positions:
-                            if pos['level'] == buy_level_idx and abs(pos['price'] - buy_price) < 0.01:
+                            if pos['level'] == buy_level_idx and abs(pos['price'] - buy_price) < price_tolerance:
                                 buy_pos = pos
                                 break
                         
@@ -978,35 +1000,43 @@ class SimpleLeanRunner:
 def main():
     """Main entry point."""
     # Create configuration
-    # Objective: Maximize ROE (per user preference) under 5x leverage and 20% max DD tolerance.
+    # STAGE 1: Extended Backtest Validation (6 months, 5x leverage, all risk controls enabled)
+    # Objective: Verify strategy robustness across different market conditions
     config = TaoGridLeanConfig(
-        name="TaoGrid Optimized - Max ROE (Perp)",
-        description="Inventory-aware grid (perp maker fee 0.02%), focus on max ROE",
+        name="TaoGrid Stage 1 - Extended Validation",
+        description="6-month backtest with full risk controls (5x leverage, all factors enabled)",
 
         # ========== S/R Levels ==========
-        support=107000.0,
-        resistance=123000.0,
-        regime="NEUTRAL_RANGE",
+        # Ranging market period (EMA20/EMA50 tangled on 4H): 2024-12-01 to 2025-02-23
+        support=92000.0,
+        resistance=106000.0,
+        regime="NEUTRAL_RANGE",  # Neutral ranging strategy
 
         # ========== Grid Parameters ==========
-        # With perp maker fee=0.02% (2x round trip = 0.04%), we can use thinner min_return.
-        # Start from a high-ROE sweep winner:
-        # - min_return = 0.12% (net)
-        # - trading_costs = 0.04% (2 × 0.02% maker_fee, slippage=0)
-        # - base_spacing = 0.16%
-        # - grid_layers = 40 (denser grid)
         grid_layers_buy=40,
         grid_layers_sell=40,
-        weight_k=0.0,  # more uniform sizing (less edge-heavy) to improve ROE in mid-range churn
+        weight_k=0.0,
         spacing_multiplier=1.0,
         min_return=0.0012,
         maker_fee=0.0002,
+        volatility_k=0.2,  # Mild volatility adjustment (multiplicative formula: 0.1-0.3 for ranging)
         inventory_skew_k=0.5,
         inventory_capacity_threshold_pct=1.0,
-        # Disable MR+Trend factor for now: it behaved like heavy risk-control and reduced Sharpe
-        # in ablation. We keep only breakout risk-off (Option 1).
-        enable_mr_trend_factor=False,
-        # Breakout risk factor (aggressive sweep winner, Sharpe-ranked, MaxDD<=20%):
+
+        # ========== STAGE 1: ENABLE ALL RISK CONTROLS ==========
+        # MR+Trend factor: Enable to test downtrend protection
+        enable_mr_trend_factor=True,
+        mr_z_lookback=240,
+        mr_z_ref=2.0,
+        mr_min_mult=1.0,
+        trend_ema_period=120,
+        trend_slope_lookback=60,
+        trend_slope_ref=0.001,
+        trend_block_threshold=0.80,
+        trend_buy_k=0.40,
+        trend_buy_floor=0.50,
+
+        # Breakout risk factor
         enable_breakout_risk_factor=True,
         breakout_band_atr_mult=1.0,
         breakout_band_pct=0.008,
@@ -1014,7 +1044,8 @@ def main():
         breakout_buy_k=2.0,
         breakout_buy_floor=0.5,
         breakout_block_threshold=0.9,
-        # Range position asymmetry v2 (top-band only) - sweep winner:
+
+        # Range position asymmetry v2
         enable_range_pos_asymmetry_v2=True,
         range_top_band_start=0.45,
         range_buy_k=0.2,
@@ -1022,41 +1053,145 @@ def main():
         range_sell_k=1.5,
         range_sell_cap=1.5,
 
+        # Funding factor
+        enable_funding_factor=True,
+
+        # Volatility regime factor
+        enable_vol_regime_factor=True,
+
         # ========== Risk / Execution ==========
         risk_budget_pct=1.0,
         enable_throttling=True,
         initial_cash=100000.0,
-        leverage=50.0,
-        # Temporarily disable MM risk zone to test basic trading logic
-        # After verifying basic functionality works, re-enable with adjusted thresholds
-        enable_mm_risk_zone=False,
-        # Enable console log for filled_levels debugging
-        enable_console_log=True,
+        leverage=5.0,  # REDUCED FROM 50x TO 5x (conservative)
+
+        # ========== MM RISK ZONE: ENABLE FOR FULL PROTECTION ==========
+        enable_mm_risk_zone=True,
+        mm_risk_level1_buy_mult=0.2,
+        mm_risk_level1_sell_mult=3.0,
+        mm_risk_inventory_penalty=0.5,
+        mm_risk_level2_buy_mult=0.1,
+        mm_risk_level2_sell_mult=4.0,
+        mm_risk_level3_atr_mult=2.0,
+        mm_risk_level3_buy_mult=0.05,
+        mm_risk_level3_sell_mult=5.0,
+        max_risk_atr_mult=3.0,
+        max_risk_loss_pct=0.30,
+        max_risk_inventory_pct=0.80,
+        enable_profit_buffer=True,
+        profit_buffer_ratio=0.5,
+
+        # Disable console log to speed up backtest
+        enable_console_log=False,
     )
 
-    # Run backtest
+    # Run backtest - STAGE 1: Ranging market test (2024-12-01 to 2025-02-23)
+    print("=" * 80)
+    print("STAGE 1: Ranging Market Backtest")
+    print("=" * 80)
+    print(f"Period: ~84 days (2024-12-01 to 2025-02-23)")
+    print(f"Market Condition: EMA20/EMA50 tangled (ranging/consolidation)")
+    print(f"Support/Resistance: $92,000 - $106,000")
+    print(f"Leverage: 5x (reduced from 50x)")
+    print(f"Risk Controls: ALL ENABLED")
+    print(f"  - MM Risk Zone: ENABLED")
+    print(f"  - MR+Trend Factor: ENABLED")
+    print(f"  - Breakout Risk: ENABLED")
+    print(f"  - Funding Factor: ENABLED")
+    print(f"  - Vol Regime: ENABLED")
+    print("=" * 80)
+    print()
+
     runner = SimpleLeanRunner(
         config=config,
         symbol="BTCUSDT",
         timeframe="1m",
-        start_date=datetime(2025, 9, 26, tzinfo=timezone.utc),
-        end_date=datetime(2025, 10, 26, tzinfo=timezone.utc),
+        start_date=datetime(2024, 12, 1, tzinfo=timezone.utc),
+        end_date=datetime(2025, 2, 23, tzinfo=timezone.utc),
+        verbose=True,
+        progress_every=5000,  # Progress update every 5k bars
     )
     results = runner.run()
 
     # Print summary
     runner.print_summary(results)
 
-    # Save results
-    output_dir = runner.output_dir or Path("run/results_lean_taogrid")
+    # DEBUG: Analyze match failures
+    if hasattr(runner, '_match_failures') and runner._match_failures:
+        print()
+        print("=" * 80)
+        print("MATCH FAILURE ANALYSIS")
+        print("=" * 80)
+        print(f"Total match failures: {len(runner._match_failures)}")
+        print()
+
+        # Analyze first 10 failures
+        print("First 10 match failures:")
+        for i, failure in enumerate(runner._match_failures[:10]):
+            print(f"\n{i+1}. Timestamp: {failure['timestamp']}")
+            print(f"   Sell Level: {failure['sell_level']}")
+            print(f"   Total buy positions: {failure['total_buy_positions']}")
+            print(f"   Available: {', '.join(failure['available_buy_positions']) if failure['available_buy_positions'] else 'NONE'}")
+
+        # Count failures by sell level
+        from collections import Counter
+        sell_level_failures = Counter(f['sell_level'] for f in runner._match_failures)
+        print("\n\nMatch failures by sell level:")
+        for level, count in sell_level_failures.most_common(10):
+            print(f"  Level {level}: {count} failures")
+
+        # Analyze pattern - are there buy positions but wrong target_sell_level?
+        failures_with_positions = [f for f in runner._match_failures if f['total_buy_positions'] > 0]
+        failures_without_positions = [f for f in runner._match_failures if f['total_buy_positions'] == 0]
+
+        print(f"\n\nMatch failures WITH buy positions available: {len(failures_with_positions)} ({len(failures_with_positions)/len(runner._match_failures)*100:.1f}%)")
+        print(f"Match failures WITHOUT any buy positions: {len(failures_without_positions)} ({len(failures_without_positions)/len(runner._match_failures)*100:.1f}%)")
+
+        print("=" * 80)
+
+    # Save results to separate directory for Stage 1
+    output_dir = runner.output_dir or Path("run/results_stage1_extended")
     runner.save_results(results, output_dir)
 
-    if runner.verbose:
-        print()
-        print("Next steps:")
-        print(f"1. Review metrics in: {output_dir}/metrics.json")
-        print(f"2. Analyze trades in: {output_dir}/trades.csv")
-        print(f"3. Plot equity curve from: {output_dir}/equity_curve.csv")
+    print()
+    print("=" * 80)
+    print("STAGE 1 VALIDATION CHECKLIST")
+    print("=" * 80)
+    print("Review the following metrics:")
+    print(f"  1. Sharpe Ratio > 2.0? (Current: {results['metrics']['sharpe_ratio']:.2f})")
+    print(f"  2. Max Drawdown < 20%? (Current: {results['metrics']['max_drawdown']:.2%})")
+    print(f"  3. Avg Return/Trade > 0? (Current: {results['metrics']['avg_return_per_trade']:.4%})")
+    print(f"  4. Win Rate > 60%? (Current: {results['metrics']['win_rate']:.2%})")
+
+    # Calculate profit factor as proxy for profit/loss ratio
+    win_rate = results['metrics']['win_rate']
+    avg_win = results['metrics']['avg_win']
+    avg_loss = abs(results['metrics']['avg_loss'])
+    profit_loss_ratio = avg_win / avg_loss if avg_loss > 0 else 0
+    print(f"  5. Profit/Loss Ratio > 1.5? (Current: {profit_loss_ratio:.2f})")
+    print()
+    print("Results saved to:")
+    print(f"  - Metrics: {output_dir}/metrics.json")
+    print(f"  - Trades: {output_dir}/trades.csv")
+    print(f"  - Equity: {output_dir}/equity_curve.csv")
+    print()
+
+    # Quick pass/fail assessment
+    all_passed = (
+        results['metrics']['sharpe_ratio'] > 2.0 and
+        results['metrics']['max_drawdown'] > -0.20 and
+        results['metrics']['avg_return_per_trade'] > 0 and
+        results['metrics']['win_rate'] > 0.60 and
+        profit_loss_ratio > 1.5
+    )
+
+    if all_passed:
+        print("[PASS] STAGE 1 PASSED - All validation criteria met!")
+        print("   Next: Proceed to Stage 2 (Fix live code)")
+    else:
+        print("[FAIL] STAGE 1 FAILED - Some criteria not met")
+        print("   Action: Review trades.csv and optimize parameters, or reconsider strategy")
+    print("=" * 80)
 
 
 if __name__ == "__main__":

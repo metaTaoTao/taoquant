@@ -1,7 +1,7 @@
 """
 Bitget Market Data Source.
 
-This module provides market data access using the Bitget SDK.
+This module provides market data access using CCXT (Bitget).
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ from utils.timeframes import timeframe_to_minutes
 
 
 class BitgetSDKDataSource(MarketDataSource):
-    """Market data source powered by the official Bitget SDK."""
+    """Market data source powered by CCXT (Bitget)."""
 
     name = "bitget_sdk"
 
@@ -54,19 +54,26 @@ class BitgetSDKDataSource(MarketDataSource):
             Enable debug logging
         """
         try:
-            from bitget import Client  # type: ignore
+            import ccxt  # type: ignore
         except ImportError as exc:
             raise ImportError(
-                "bitget-python package is required for BitgetSDKDataSource. "
-                "Install via pip install bitget-python."
+                "ccxt package is required for Bitget market data. Install via pip install ccxt."
             ) from exc
 
-        # Initialize client (API credentials optional for market data)
+        # Initialize exchange (credentials optional for public data)
+        params = {
+            "enableRateLimit": True,
+        }
         if api_key and api_secret and passphrase:
-            self._client = Client(api_key, api_secret, passphrase=passphrase)
-        else:
-            # Public market data doesn't require credentials
-            self._client = None
+            params.update(
+                {
+                    "apiKey": api_key,
+                    "secret": api_secret,
+                    "password": passphrase,  # Bitget passphrase in CCXT
+                }
+            )
+
+        self._exchange = ccxt.bitget(params)
 
         self._max_batch = max_batch
         self._max_total = max_total
@@ -99,133 +106,91 @@ class BitgetSDKDataSource(MarketDataSource):
         pd.DataFrame
             OHLCV data with timestamp index
         """
-        # Initialize client if not already done
-        if self._client is None:
-            try:
-                from bitget import Client  # type: ignore
-                # Use empty credentials for public data
-                self._client = Client("", "", passphrase="")
-            except ImportError:
-                raise ImportError("bitget-python package is required")
-
-        # Convert symbol format (BTCUSDT -> BTCUSDT_SPBL for spot)
-        bitget_symbol = self._convert_symbol(symbol)
-        bitget_interval = self._interval_to_bitget(timeframe)
+        # Convert symbol format to CCXT (BTCUSDT -> BTC/USDT)
+        ccxt_symbol = self._convert_symbol(symbol)
+        ccxt_timeframe = timeframe.lower()
 
         records = []
         fetched = 0
-        next_end_time = None
+        # CCXT uses `since` (ms) as start time
+        end_ms = int(self._to_utc(end).timestamp() * 1000) if end is not None else None
+        since_ms = int(self._to_utc(start).timestamp() * 1000) if start is not None else None
 
-        if end is not None:
-            end_ms = int(self._to_utc(end).timestamp() * 1000)
+        # Default: fetch recent bars
+        if since_ms is None and end_ms is None:
+            limit = min(self._max_batch, self._max_total)
+            ohlcv = self._exchange.fetch_ohlcv(ccxt_symbol, timeframe=ccxt_timeframe, limit=limit)
+            for ts_ms, o, h, l, c, v in ohlcv:
+                records.append({"timestamp": int(ts_ms), "open": float(o), "high": float(h), "low": float(l), "close": float(c), "volume": float(v)})
         else:
-            end_ms = int(pd.Timestamp.now(tz="UTC").timestamp() * 1000)
+            # Iterate forward from since_ms until end_ms.
+            # Some exchanges may return OHLCV in descending order; we advance by the max timestamp.
+            tf_min = timeframe_to_minutes(ccxt_timeframe)
+            step_ms = int(tf_min * 60_000)
+            cursor = since_ms
 
-        if start is not None:
-            start_ms = int(self._to_utc(start).timestamp() * 1000)
-        else:
-            # Default: fetch last 1000 bars
-            start_ms = None
+            # De-duplicate by timestamp
+            seen_ts: set[int] = set()
 
-        while fetched < self._max_total:
-            limit = min(self._max_batch, self._max_total - fetched)
-            if limit <= 0:
-                break
-
-            try:
-                # Bitget API: get klines
-                # Note: Bitget API may have different parameter names
-                # This is a placeholder - actual API call may vary
-                params = {
-                    "symbol": bitget_symbol,
-                    "granularity": bitget_interval,
-                    "limit": str(limit),
-                }
-
-                if next_end_time is not None:
-                    params["endTime"] = str(next_end_time)
-                elif end_ms is not None:
-                    params["endTime"] = str(end_ms)
-
-                if self._debug:
-                    print(f"[Bitget SDK] Request params: {params}")
-
-                # Call Bitget market API
-                # Note: Actual API method name may vary - check Bitget SDK documentation
-                response = self._client.market.get_candles(**params)
-
-                if self._debug:
-                    print(f"[Bitget SDK] Response type: {type(response)}")
-
-                # Parse response
-                if isinstance(response, dict):
-                    batch = response.get("data", []) or []
-                    code = response.get("code", "")
-                    if code and code != "00000":  # Bitget success code
-                        if self._debug:
-                            print(f"[Bitget SDK] API Error: {response}")
-                        break
-                elif isinstance(response, list):
-                    batch = response
-                else:
-                    batch = []
-
-                if not batch:
-                    if self._debug:
-                        print(f"[Bitget SDK] No more data. Fetched {fetched} bars.")
+            while fetched < self._max_total:
+                limit = min(self._max_batch, self._max_total - fetched)
+                if limit <= 0:
                     break
 
-                if self._debug:
-                    print(f"[Bitget SDK] Got {len(batch)} bars in this batch")
+                try:
+                    if self._debug:
+                        print(f"[Bitget CCXT] fetch_ohlcv(symbol={ccxt_symbol}, tf={ccxt_timeframe}, since={cursor}, limit={limit})")
 
-                # Convert to standard format
-                for item in batch:
-                    # Bitget format: [timestamp, open, high, low, close, volume, ...]
-                    # Adjust based on actual Bitget response format
-                    if isinstance(item, list) and len(item) >= 6:
-                        ts_ms = int(item[0])
-                        records.append({
-                            "timestamp": ts_ms,
-                            "open": float(item[1]),
-                            "high": float(item[2]),
-                            "low": float(item[3]),
-                            "close": float(item[4]),
-                            "volume": float(item[5]),
-                        })
-                    elif isinstance(item, dict):
-                        # If Bitget returns dict format
-                        records.append({
-                            "timestamp": int(item.get("ts", item.get("time", 0))),
-                            "open": float(item.get("open", 0)),
-                            "high": float(item.get("high", 0)),
-                            "low": float(item.get("low", 0)),
-                            "close": float(item.get("close", 0)),
-                            "volume": float(item.get("vol", item.get("volume", 0))),
-                        })
-
-                fetched += len(batch)
-
-                # Update next_end_time to oldest timestamp in batch
-                if records:
-                    oldest_ts = records[-1]["timestamp"]
-                    next_end_time = oldest_ts - 1  # Get older data
-
-                # Check if we've reached start time
-                if start_ms is not None and records:
-                    oldest_ts = records[-1]["timestamp"]
-                    if oldest_ts <= start_ms:
-                        if self._debug:
-                            print(f"[Bitget SDK] Reached start time. Fetched {fetched} bars.")
+                    ohlcv = self._exchange.fetch_ohlcv(
+                        ccxt_symbol,
+                        timeframe=ccxt_timeframe,
+                        since=cursor,
+                        limit=limit,
+                    )
+                    if not ohlcv:
                         break
 
-                time.sleep(self._sleep_seconds)
+                    batch_ts_max = None
+                    for ts_ms, o, h, l, c, v in ohlcv:
+                        ts_ms_i = int(ts_ms)
+                        if end_ms is not None and ts_ms_i > end_ms:
+                            continue
+                        if ts_ms_i in seen_ts:
+                            continue
+                        seen_ts.add(ts_ms_i)
 
-            except Exception as e:
-                if self._debug:
-                    print(f"[Bitget SDK] Exception: {e}")
-                    import traceback
-                    traceback.print_exc()
-                break
+                        records.append(
+                            {
+                                "timestamp": ts_ms_i,
+                                "open": float(o),
+                                "high": float(h),
+                                "low": float(l),
+                                "close": float(c),
+                                "volume": float(v),
+                            }
+                        )
+                        batch_ts_max = ts_ms_i if batch_ts_max is None else max(batch_ts_max, ts_ms_i)
+
+                    fetched = len(records)
+                    if batch_ts_max is None:
+                        break
+
+                    next_cursor = batch_ts_max + step_ms
+                    if next_cursor <= cursor:
+                        # No forward progress => stop to avoid infinite loop
+                        break
+                    cursor = next_cursor
+
+                    if end_ms is not None and cursor > end_ms:
+                        break
+
+                    time.sleep(self._sleep_seconds)
+                except Exception as e:
+                    if self._debug:
+                        print(f"[Bitget CCXT] Exception: {e}")
+                        import traceback
+                        traceback.print_exc()
+                    break
 
         if not records:
             return pd.DataFrame(columns=COLUMNS_OHLCV)
@@ -266,61 +231,24 @@ class BitgetSDKDataSource(MarketDataSource):
             Latest bar data with keys: timestamp, open, high, low, close, volume
         """
         try:
-            from bitget import Client  # type: ignore
-            if self._client is None:
-                self._client = Client("", "", passphrase="")
-        except ImportError:
-            return None
+            ccxt_symbol = self._convert_symbol(symbol)
+            ccxt_timeframe = timeframe.lower()
+            ohlcv = self._exchange.fetch_ohlcv(ccxt_symbol, timeframe=ccxt_timeframe, limit=2)
+            if not ohlcv:
+                return None
 
-        bitget_symbol = self._convert_symbol(symbol)
-        bitget_interval = self._interval_to_bitget(timeframe)
-
-        try:
-            # Get latest candle
-            params = {
-                "symbol": bitget_symbol,
-                "granularity": bitget_interval,
-                "limit": "1",
+            ts_ms, o, h, l, c, v = ohlcv[-1]
+            return {
+                "timestamp": pd.Timestamp(int(ts_ms), unit="ms", tz="UTC"),
+                "open": float(o),
+                "high": float(h),
+                "low": float(l),
+                "close": float(c),
+                "volume": float(v),
             }
-
-            response = self._client.market.get_candles(**params)
-
-            if isinstance(response, dict):
-                data = response.get("data", [])
-                code = response.get("code", "")
-                if code != "00000" or not data:
-                    return None
-            elif isinstance(response, list):
-                data = response
-            else:
-                return None
-
-            if not data:
-                return None
-
-            item = data[0]
-            if isinstance(item, list) and len(item) >= 6:
-                return {
-                    "timestamp": pd.Timestamp(int(item[0]), unit="ms", tz="UTC"),
-                    "open": float(item[1]),
-                    "high": float(item[2]),
-                    "low": float(item[3]),
-                    "close": float(item[4]),
-                    "volume": float(item[5]),
-                }
-            elif isinstance(item, dict):
-                return {
-                    "timestamp": pd.Timestamp(int(item.get("ts", item.get("time", 0))), unit="ms", tz="UTC"),
-                    "open": float(item.get("open", 0)),
-                    "high": float(item.get("high", 0)),
-                    "low": float(item.get("low", 0)),
-                    "close": float(item.get("close", 0)),
-                    "volume": float(item.get("vol", item.get("volume", 0))),
-                }
-
         except Exception as e:
             if self._debug:
-                print(f"[Bitget SDK] Error getting latest bar: {e}")
+                print(f"[Bitget CCXT] Error getting latest bar: {e}")
             return None
 
         return None
@@ -337,48 +265,15 @@ class BitgetSDKDataSource(MarketDataSource):
         Returns
         -------
         str
-            Bitget symbol format
+            CCXT symbol format (e.g., BTC/USDT)
         """
-        # Bitget spot format: BTCUSDT_SPBL
-        # Adjust based on actual Bitget symbol format
         upper = symbol.upper()
-        if upper.endswith("USDT"):
-            return f"{upper}_SPBL"  # Spot
-        return symbol
-
-    @staticmethod
-    def _interval_to_bitget(interval: str) -> str:
-        """
-        Convert timeframe to Bitget format.
-
-        Parameters
-        ----------
-        interval : str
-            Timeframe like "1m", "5m", "1h"
-
-        Returns
-        -------
-        str
-            Bitget interval format
-        """
-        mapping = {
-            "1m": "1min",
-            "3m": "3min",
-            "5m": "5min",
-            "15m": "15min",
-            "30m": "30min",
-            "1h": "1hour",
-            "2h": "2hour",
-            "4h": "4hour",
-            "6h": "6hour",
-            "12h": "12hour",
-            "1d": "1day",
-            "1w": "1week",
-        }
-        key = interval.lower()
-        if key not in mapping:
-            raise ValueError(f"Unsupported Bitget interval: {interval}")
-        return mapping[key]
+        if "/" in upper:
+            return upper.replace("-", "/")
+        if upper.endswith("USDT") and len(upper) > 4:
+            base = upper[:-4]
+            return f"{base}/USDT"
+        return upper
 
     @staticmethod
     def _to_utc(dt: datetime) -> pd.Timestamp:

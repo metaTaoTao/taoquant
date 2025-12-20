@@ -153,23 +153,36 @@ def calculate_grid_spacing(
     atr_pct = atr / atr_rolling_mean
 
     # ========== Calculate Spacing ==========
-    # gap_% = min_return + trading_costs + volatility_adjustment
+    # IMPROVED FORMULA (Multiplicative): spacing = base × (1 + k × volatility)
+    # This prevents volatility from dominating the spacing calculation
+    #
+    # Old (additive): spacing = base + k × (atr_pct - 1.0)
+    #   Problem: When atr_pct = 9, adjustment = 0.6 × 8 = 4.8 (480%!) → dominates
+    #
+    # New (multiplicative): spacing = base × (1 + k × max(0, atr_pct - 1.0))
+    #   Effect: When atr_pct = 9, spacing = base × (1 + 0.2 × 8) = base × 2.6 → controlled
+    #
     # min_return is NET return (after all costs)
-    # So grid spacing = min_return + trading costs
+    # So grid spacing = min_return + trading costs (base), then scaled by volatility
     base_spacing = min_return + trading_costs  # Gross spacing needed for min_return net profit
-    volatility_adjustment = volatility_k * (atr_pct - 1.0)  # Deviation from mean
 
-    spacing_pct = base_spacing + volatility_adjustment
+    # Volatility multiplier (only expand spacing, never reduce below base)
+    # Use max(0, ...) to ensure we only expand when ATR > mean, never contract
+    volatility_multiplier = 1.0 + volatility_k * np.maximum(0, atr_pct - 1.0)
+
+    # Apply multiplicative adjustment
+    spacing_pct = base_spacing * volatility_multiplier
 
     # ========== Lower Bound Protection ==========
     # Ensure spacing is at least base_spacing (to guarantee min_return net profit)
-    # Only allow spacing to be reduced by volatility if it doesn't go below base_spacing
-    # This ensures we always get at least min_return net profit
+    # With multiplicative formula and max(0, ...), this is automatically satisfied
+    # but we keep it as a safety check
     spacing_pct = spacing_pct.clip(lower=base_spacing)
 
-    # ========== Upper Bound Protection (New) ==========
+    # ========== Upper Bound Protection ==========
     # Prevent spacing from becoming too large (reduces turnover excessively)
-    MAX_SPACING = 0.05  # 5% maximum spacing
+    # Note: For ranging strategies, use volatility_k=0 to disable ATR adjustment entirely
+    MAX_SPACING = 0.02  # 2% maximum spacing (reasonable upper bound)
     spacing_pct = spacing_pct.clip(upper=MAX_SPACING)
 
     return spacing_pct

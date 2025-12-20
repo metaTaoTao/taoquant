@@ -187,12 +187,27 @@ class GridManager:
         self.buy_levels = grid_result["buy_levels"]
         self.sell_levels = grid_result["sell_levels"]
 
-        # Calculate weights
+        # Warn if fewer levels generated than requested
+        if len(self.buy_levels) < self.config.grid_layers_buy:
+            import warnings
+            warnings.warn(
+                f"Requested {self.config.grid_layers_buy} buy layers, but only {len(self.buy_levels)} were generated. "
+                f"This is because the spacing ({spacing_pct:.2%}) is too large for the available range. "
+                f"Consider: (1) reducing min_return, (2) reducing spacing_multiplier, or (3) using a wider support/resistance range."
+            )
+        if len(self.sell_levels) < self.config.grid_layers_sell:
+            import warnings
+            warnings.warn(
+                f"Requested {self.config.grid_layers_sell} sell layers, but only {len(self.sell_levels)} were generated. "
+                f"This is because the spacing ({spacing_pct:.2%}) is too large for the available range."
+            )
+
+        # Calculate weights (use actual number of levels generated, not requested)
         self.buy_weights = calculate_level_weights(
-            num_levels=self.config.grid_layers_buy, weight_k=self.config.weight_k
+            num_levels=len(self.buy_levels), weight_k=self.config.weight_k
         )
         self.sell_weights = calculate_level_weights(
-            num_levels=self.config.grid_layers_sell, weight_k=self.config.weight_k
+            num_levels=len(self.sell_levels), weight_k=self.config.weight_k
         )
 
         # Apply regime allocation (calculate allocation ratios)
@@ -767,7 +782,28 @@ class GridManager:
                     mm_sell_mult = float(getattr(self.config, "mm_risk_level1_sell_mult", 3.0))
                 base_size_btc = base_size_btc * mm_sell_mult
             
-            base_size_btc = min(base_size_btc, max(0.0, float(holdings_btc)))
+            # BUG FIX: Limit sell size to corresponding buy position size
+            # This prevents sell size amplification from causing FIFO fallback and wrong pairing
+            # Grid strategy should maintain buy/sell symmetry: sell[i] should only sell buy[i] positions
+            target_buy_size = 0.0
+            for buy_level_idx, positions in self.buy_positions.items():
+                for pos in positions:
+                    if pos.get('target_sell_level') == level_index:
+                        target_buy_size += pos['size']
+            
+            # Limit sell size to corresponding buy position size (if found)
+            # This ensures grid pairing correctness and prevents wrong matches
+            if target_buy_size > 0:
+                size_before_limit = base_size_btc
+                base_size_btc = min(base_size_btc, target_buy_size)
+                if getattr(self.config, "enable_console_log", False) and size_before_limit > target_buy_size:
+                    print(f"[ORDER_SIZE] SELL L{level_index+1} size limited to buy position size: {base_size_btc:.4f} BTC (was {size_before_limit:.4f} BTC before limit, buy position size: {target_buy_size:.4f} BTC)")
+            else:
+                # Fallback: if no matching buy position found, limit to total holdings
+                # This can happen if buy position was already matched or if there's a mismatch
+                base_size_btc = min(base_size_btc, max(0.0, float(holdings_btc)))
+                if getattr(self.config, "enable_console_log", False):
+                    print(f"[ORDER_SIZE] SELL L{level_index+1} no matching buy position found, limiting to holdings: {base_size_btc:.4f} BTC")
 
         # Apply throttling if enabled
         if self.config.enable_throttling:

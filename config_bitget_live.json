@@ -1,0 +1,23 @@
+{
+  "strategy": {
+    "name": "TaoGrid Live",
+    "support": 80000.0,
+    "resistance": 94000.0,
+    "regime": "NEUTRAL_RANGE",
+    "grid_layers_buy": 35,
+    "grid_layers_sell": 35,
+    "initial_cash": 100.0,
+    "min_return": 0.001,
+    "spacing_multiplier": 1.0,
+    "risk_budget_pct": 0.3,
+    "maker_fee": 0.0002,
+    "volatility_k": 0.6,
+    "cushion_multiplier": 0.8,
+    "atr_period": 14,
+    "weight_k": 0.5,
+    "leverage": 1.0,
+    "enable_throttling": true,
+    "enable_mm_risk_zone": true,
+    "enable_console_log": true
+  }
+}

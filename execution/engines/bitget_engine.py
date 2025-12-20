@@ -1,7 +1,7 @@
 """
 Bitget Trading Execution Engine.
 
-This module provides order execution functionality for Bitget exchange.
+This module provides order execution functionality for Bitget exchange via CCXT.
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ import time
 
 
 class BitgetExecutionEngine:
-    """Bitget trading execution engine."""
+    """Bitget trading execution engine (CCXT)."""
 
     def __init__(
         self,
@@ -39,10 +39,10 @@ class BitgetExecutionEngine:
             Enable debug logging
         """
         try:
-            from bitget import Client  # type: ignore
+            import ccxt  # type: ignore
         except ImportError as exc:
             raise ImportError(
-                "bitget-python package is required. Install via pip install bitget-python."
+                "ccxt package is required for Bitget execution. Install via pip install ccxt."
             ) from exc
 
         self.api_key = api_key
@@ -51,8 +51,16 @@ class BitgetExecutionEngine:
         self.subaccount_uid = subaccount_uid
         self.debug = debug
 
-        # Initialize client
-        self.client = Client(api_key, api_secret, passphrase=passphrase)
+        # Initialize CCXT exchange
+        self.exchange = ccxt.bitget(
+            {
+                "apiKey": api_key,
+                "secret": api_secret,
+                "password": passphrase,  # Bitget passphrase in CCXT
+                "enableRateLimit": True,
+                "options": {"defaultType": "spot"},
+            }
+        )
 
         # Track pending orders
         self.pending_orders: Dict[str, Dict[str, Any]] = {}
@@ -87,60 +95,37 @@ class BitgetExecutionEngine:
             Order response with order_id, status, etc.
         """
         try:
-            # Convert symbol format
-            bitget_symbol = self._convert_symbol(symbol)
-            bitget_side = "buy" if side.lower() == "buy" else "sell"
+            ccxt_symbol = self._convert_symbol(symbol)
+            ccxt_side = "buy" if side.lower() == "buy" else "sell"
+            ccxt_type = "limit" if order_type == "limit" else order_type
 
-            # Prepare order parameters
-            params = {
-                "symbol": bitget_symbol,
-                "side": bitget_side,
-                "orderType": order_type,
-                "price": str(price),
-                "size": str(quantity),
+            # CCXT: amount/price precision
+            amount = float(self.exchange.amount_to_precision(ccxt_symbol, quantity))
+            px = float(self.exchange.price_to_precision(ccxt_symbol, price))
+
+            if self.debug:
+                print(f"[Bitget CCXT Engine] create_order(symbol={ccxt_symbol}, side={ccxt_side}, amount={amount}, price={px})")
+
+            order = self.exchange.create_order(ccxt_symbol, ccxt_type, ccxt_side, amount, px)
+            order_id = str(order.get("id", ""))
+            if not order_id:
+                return None
+
+            order_info = {
+                "order_id": order_id,
+                "symbol": symbol,
+                "side": side,
+                "price": price,
+                "quantity": quantity,
+                "status": str(order.get("status", "open")),
+                "timestamp": datetime.now(),
             }
-
-            if self.subaccount_uid:
-                params["subUid"] = self.subaccount_uid
-
-            if self.debug:
-                print(f"[Bitget Engine] Placing order: {params}")
-
-            # Place spot order
-            response = self.client.spot.place_order(**params)
-
-            if self.debug:
-                print(f"[Bitget Engine] Order response: {response}")
-
-            # Parse response
-            if isinstance(response, dict):
-                code = response.get("code", "")
-                if code == "00000":  # Success
-                    data = response.get("data", {})
-                    order_id = data.get("orderId") or data.get("order_id")
-                    if order_id:
-                        order_info = {
-                            "order_id": str(order_id),
-                            "symbol": symbol,
-                            "side": side,
-                            "price": price,
-                            "quantity": quantity,
-                            "status": "pending",
-                            "timestamp": datetime.now(),
-                        }
-                        self.pending_orders[str(order_id)] = order_info
-                        return order_info
-                else:
-                    msg = response.get("msg", "Unknown error")
-                    if self.debug:
-                        print(f"[Bitget Engine] Order failed: {msg}")
-                    return None
-
-            return None
+            self.pending_orders[order_id] = order_info
+            return order_info
 
         except Exception as e:
             if self.debug:
-                print(f"[Bitget Engine] Error placing order: {e}")
+                print(f"[Bitget CCXT Engine] Error placing order: {e}")
                 import traceback
                 traceback.print_exc()
             return None
@@ -162,34 +147,17 @@ class BitgetExecutionEngine:
             True if cancellation successful
         """
         try:
-            bitget_symbol = self._convert_symbol(symbol)
-
-            params = {
-                "symbol": bitget_symbol,
-                "orderId": order_id,
-            }
-
-            if self.subaccount_uid:
-                params["subUid"] = self.subaccount_uid
-
+            ccxt_symbol = self._convert_symbol(symbol)
             if self.debug:
-                print(f"[Bitget Engine] Cancelling order: {params}")
-
-            response = self.client.spot.cancel_order(**params)
-
-            if isinstance(response, dict):
-                code = response.get("code", "")
-                if code == "00000":
-                    # Remove from pending orders
-                    if order_id in self.pending_orders:
-                        del self.pending_orders[order_id]
-                    return True
-
-            return False
+                print(f"[Bitget CCXT Engine] cancel_order(order_id={order_id}, symbol={ccxt_symbol})")
+            self.exchange.cancel_order(order_id, ccxt_symbol)
+            if order_id in self.pending_orders:
+                del self.pending_orders[order_id]
+            return True
 
         except Exception as e:
             if self.debug:
-                print(f"[Bitget Engine] Error cancelling order: {e}")
+                print(f"[Bitget CCXT Engine] Error cancelling order: {e}")
             return False
 
     def get_open_orders(self, symbol: Optional[str] = None) -> List[Dict[str, Any]]:
@@ -207,36 +175,30 @@ class BitgetExecutionEngine:
             List of open orders
         """
         try:
-            params = {}
-            if symbol:
-                params["symbol"] = self._convert_symbol(symbol)
-
-            if self.subaccount_uid:
-                params["subUid"] = self.subaccount_uid
-
-            response = self.client.spot.open_orders(**params)
-
             orders = []
-            if isinstance(response, dict):
-                code = response.get("code", "")
-                if code == "00000":
-                    data = response.get("data", [])
-                    for item in data:
-                        orders.append({
-                            "order_id": str(item.get("orderId") or item.get("order_id", "")),
-                            "symbol": item.get("symbol", ""),
-                            "side": item.get("side", ""),
-                            "price": float(item.get("price", 0)),
-                            "quantity": float(item.get("size") or item.get("quantity", 0)),
-                            "filled_quantity": float(item.get("filledSize") or item.get("filled_quantity", 0)),
-                            "status": item.get("status", "pending"),
-                        })
+            if symbol:
+                ccxt_symbol = self._convert_symbol(symbol)
+                raw = self.exchange.fetch_open_orders(ccxt_symbol)
+            else:
+                raw = self.exchange.fetch_open_orders()
 
+            for o in raw:
+                orders.append(
+                    {
+                        "order_id": str(o.get("id", "")),
+                        "symbol": str(o.get("symbol", "")),
+                        "side": str(o.get("side", "")),
+                        "price": float(o.get("price") or 0.0),
+                        "quantity": float(o.get("amount") or 0.0),
+                        "filled_quantity": float(o.get("filled") or 0.0),
+                        "status": str(o.get("status", "open")),
+                    }
+                )
             return orders
 
         except Exception as e:
             if self.debug:
-                print(f"[Bitget Engine] Error getting open orders: {e}")
+                print(f"[Bitget CCXT Engine] Error getting open orders: {e}")
             return []
 
     def get_order_status(self, symbol: str, order_id: str) -> Optional[Dict[str, Any]]:
@@ -256,37 +218,21 @@ class BitgetExecutionEngine:
             Order status information
         """
         try:
-            bitget_symbol = self._convert_symbol(symbol)
-
-            params = {
-                "symbol": bitget_symbol,
-                "orderId": order_id,
+            ccxt_symbol = self._convert_symbol(symbol)
+            o = self.exchange.fetch_order(order_id, ccxt_symbol)
+            return {
+                "order_id": str(o.get("id", "")),
+                "symbol": str(o.get("symbol", "")),
+                "side": str(o.get("side", "")),
+                "price": float(o.get("price") or 0.0),
+                "quantity": float(o.get("amount") or 0.0),
+                "filled_quantity": float(o.get("filled") or 0.0),
+                "status": str(o.get("status", "unknown")),
             }
-
-            if self.subaccount_uid:
-                params["subUid"] = self.subaccount_uid
-
-            response = self.client.spot.order_info(**params)
-
-            if isinstance(response, dict):
-                code = response.get("code", "")
-                if code == "00000":
-                    data = response.get("data", {})
-                    return {
-                        "order_id": str(data.get("orderId") or data.get("order_id", "")),
-                        "symbol": data.get("symbol", ""),
-                        "side": data.get("side", ""),
-                        "price": float(data.get("price", 0)),
-                        "quantity": float(data.get("size") or data.get("quantity", 0)),
-                        "filled_quantity": float(data.get("filledSize") or data.get("filled_quantity", 0)),
-                        "status": data.get("status", "unknown"),
-                    }
-
-            return None
 
         except Exception as e:
             if self.debug:
-                print(f"[Bitget Engine] Error getting order status: {e}")
+                print(f"[Bitget CCXT Engine] Error getting order status: {e}")
             return None
 
     def get_account_balance(self) -> Dict[str, Any]:
@@ -303,60 +249,52 @@ class BitgetExecutionEngine:
             - assets: List of asset balances
         """
         try:
-            params = {}
-            if self.subaccount_uid:
-                params["subUid"] = self.subaccount_uid
+            bal = self.exchange.fetch_balance()
 
-            response = self.client.account.assets(**params)
+            assets = []
+            total_equity = 0.0
+            available_balance = 0.0
+            frozen_balance = 0.0
 
-            if isinstance(response, dict):
-                code = response.get("code", "")
-                if code == "00000":
-                    data = response.get("data", {})
-                    # Parse Bitget balance format
-                    # Adjust based on actual Bitget response structure
-                    total_equity = 0.0
-                    available_balance = 0.0
-                    frozen_balance = 0.0
-                    assets = []
+            # Prefer valuing equity in USDT if possible (USDT cash + major holdings * last price).
+            free = bal.get("free", {}) or {}
+            used = bal.get("used", {}) or {}
+            total = bal.get("total", {}) or {}
 
-                    if isinstance(data, list):
-                        for asset in data:
-                            available = float(asset.get("available", 0))
-                            frozen = float(asset.get("frozen", 0))
-                            total = available + frozen
-                            total_equity += total
-                            available_balance += available
-                            frozen_balance += frozen
-                            assets.append({
-                                "currency": asset.get("coinName", ""),
-                                "available": available,
-                                "frozen": frozen,
-                                "total": total,
-                            })
-                    elif isinstance(data, dict):
-                        # If Bitget returns different format
-                        available_balance = float(data.get("available", 0))
-                        frozen_balance = float(data.get("frozen", 0))
-                        total_equity = available_balance + frozen_balance
-
-                    return {
-                        "total_equity": total_equity,
-                        "available_balance": available_balance,
-                        "frozen_balance": frozen_balance,
-                        "assets": assets,
+            # Build assets list
+            for ccy, tot in total.items():
+                try:
+                    tot_f = float(tot or 0.0)
+                except Exception:
+                    continue
+                if tot_f <= 0:
+                    continue
+                assets.append(
+                    {
+                        "currency": str(ccy),
+                        "available": float(free.get(ccy) or 0.0),
+                        "frozen": float(used.get(ccy) or 0.0),
+                        "total": tot_f,
                     }
+                )
 
+            usdt_free = float(free.get("USDT") or 0.0)
+            usdt_used = float(used.get("USDT") or 0.0)
+            available_balance = usdt_free
+            frozen_balance = usdt_used
+
+            total_equity = usdt_free + usdt_used
+            # Note: add other holdings valuation lazily in live runner when symbol is known
             return {
-                "total_equity": 0.0,
-                "available_balance": 0.0,
-                "frozen_balance": 0.0,
-                "assets": [],
+                "total_equity": total_equity,
+                "available_balance": available_balance,
+                "frozen_balance": frozen_balance,
+                "assets": assets,
             }
 
         except Exception as e:
             if self.debug:
-                print(f"[Bitget Engine] Error getting account balance: {e}")
+                print(f"[Bitget CCXT Engine] Error getting account balance: {e}")
             return {
                 "total_equity": 0.0,
                 "available_balance": 0.0,
@@ -379,7 +317,6 @@ class BitgetExecutionEngine:
             List of positions
         """
         try:
-            # For spot trading, positions are just holdings
             balance = self.get_account_balance()
             positions = []
 
@@ -387,8 +324,7 @@ class BitgetExecutionEngine:
             base_currency = None
             if symbol:
                 # Extract base currency from symbol (e.g., BTCUSDT -> BTC)
-                if symbol.endswith("USDT"):
-                    base_currency = symbol[:-4]
+                base_currency = self._base_currency(symbol)
 
             for asset in balance.get("assets", []):
                 currency = asset.get("currency", "")
@@ -409,12 +345,12 @@ class BitgetExecutionEngine:
 
         except Exception as e:
             if self.debug:
-                print(f"[Bitget Engine] Error getting positions: {e}")
+                print(f"[Bitget CCXT Engine] Error getting positions: {e}")
             return []
 
     def _convert_symbol(self, symbol: str) -> str:
         """
-        Convert symbol format to Bitget format.
+        Convert symbol format to CCXT format.
 
         Parameters
         ----------
@@ -424,10 +360,20 @@ class BitgetExecutionEngine:
         Returns
         -------
         str
-            Bitget symbol format
+            CCXT symbol format
         """
-        # Bitget spot format: BTCUSDT_SPBL
         upper = symbol.upper()
-        if upper.endswith("USDT"):
-            return f"{upper}_SPBL"
-        return symbol
+        if "/" in upper:
+            return upper.replace("-", "/")
+        if upper.endswith("USDT") and len(upper) > 4:
+            return f"{upper[:-4]}/USDT"
+        return upper
+
+    @staticmethod
+    def _base_currency(symbol: str) -> str:
+        upper = symbol.upper()
+        if "/" in upper:
+            return upper.split("/")[0]
+        if upper.endswith("USDT") and len(upper) > 4:
+            return upper[:-4]
+        return upper

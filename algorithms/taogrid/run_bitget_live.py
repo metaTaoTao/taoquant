@@ -31,6 +31,7 @@ from __future__ import annotations
 import sys
 import json
 import argparse
+import os
 from pathlib import Path
 
 # Add project root to path
@@ -67,7 +68,8 @@ def load_config_from_file(config_file: str) -> TaoGridLeanConfig:
     strategy_config = config_data.get("strategy", {})
     execution_config = config_data.get("execution", {})
 
-    # Create config object
+    # Create config object with all parameters from JSON
+    # Required parameters
     config = TaoGridLeanConfig(
         name=strategy_config.get("name", "TaoGrid Live"),
         support=float(strategy_config.get("support", 104000.0)),
@@ -76,8 +78,33 @@ def load_config_from_file(config_file: str) -> TaoGridLeanConfig:
         grid_layers_buy=int(strategy_config.get("grid_layers_buy", 5)),
         grid_layers_sell=int(strategy_config.get("grid_layers_sell", 5)),
         initial_cash=float(strategy_config.get("initial_cash", 1000.0)),
-        # Add other config parameters as needed
     )
+
+    # Optional parameters (override defaults if provided)
+    if "min_return" in strategy_config:
+        config.min_return = float(strategy_config["min_return"])
+    if "spacing_multiplier" in strategy_config:
+        config.spacing_multiplier = float(strategy_config["spacing_multiplier"])
+    if "risk_budget_pct" in strategy_config:
+        config.risk_budget_pct = float(strategy_config["risk_budget_pct"])
+    if "maker_fee" in strategy_config:
+        config.maker_fee = float(strategy_config["maker_fee"])
+    if "volatility_k" in strategy_config:
+        config.volatility_k = float(strategy_config["volatility_k"])
+    if "cushion_multiplier" in strategy_config:
+        config.cushion_multiplier = float(strategy_config["cushion_multiplier"])
+    if "atr_period" in strategy_config:
+        config.atr_period = int(strategy_config["atr_period"])
+    if "weight_k" in strategy_config:
+        config.weight_k = float(strategy_config["weight_k"])
+    if "leverage" in strategy_config:
+        config.leverage = float(strategy_config["leverage"])
+    if "enable_throttling" in strategy_config:
+        config.enable_throttling = bool(strategy_config["enable_throttling"])
+    if "enable_mm_risk_zone" in strategy_config:
+        config.enable_mm_risk_zone = bool(strategy_config["enable_mm_risk_zone"])
+    if "enable_console_log" in strategy_config:
+        config.enable_console_log = bool(strategy_config["enable_console_log"])
 
     return config
 
@@ -117,20 +144,23 @@ Examples:
 
     parser.add_argument(
         "--api-key",
-        required=True,
-        help="Bitget API Key",
+        required=False,
+        default=None,
+        help="Bitget API Key (or set env BITGET_API_KEY)",
     )
 
     parser.add_argument(
         "--api-secret",
-        required=True,
-        help="Bitget API Secret",
+        required=False,
+        default=None,
+        help="Bitget API Secret (or set env BITGET_API_SECRET)",
     )
 
     parser.add_argument(
         "--passphrase",
-        required=True,
-        help="Bitget API Passphrase",
+        required=False,
+        default=None,
+        help="Bitget API Passphrase (or set env BITGET_PASSPHRASE)",
     )
 
     # Optional arguments
@@ -157,6 +187,19 @@ Examples:
     )
 
     args = parser.parse_args()
+
+    # Resolve credentials (prefer CLI, fallback to env)
+    api_key = args.api_key or os.getenv("BITGET_API_KEY")
+    api_secret = args.api_secret or os.getenv("BITGET_API_SECRET")
+    passphrase = args.passphrase or os.getenv("BITGET_PASSPHRASE")
+
+    if not api_key or not api_secret or not passphrase:
+        print("Error: Bitget API credentials are required.")
+        print("Provide via CLI flags (--api-key/--api-secret/--passphrase) or set env:")
+        print("  - BITGET_API_KEY")
+        print("  - BITGET_API_SECRET")
+        print("  - BITGET_PASSPHRASE")
+        sys.exit(2)
 
     # Load configuration
     try:
@@ -189,9 +232,9 @@ Examples:
         runner = BitgetLiveRunner(
             config=config,
             symbol=args.symbol,
-            bitget_api_key=args.api_key,
-            bitget_api_secret=args.api_secret,
-            bitget_passphrase=args.passphrase,
+            bitget_api_key=api_key,
+            bitget_api_secret=api_secret,
+            bitget_passphrase=passphrase,
             subaccount_uid=args.subaccount_uid,
             dry_run=args.dry_run,
             log_dir=args.log_dir,

@@ -76,6 +76,9 @@ class TaoGridLeanAlgorithm:
         self.pending_orders = {}
         self.filled_orders = []
 
+        # Bar index tracking (for logging, set by runner)
+        self._current_bar_index = 0
+
         self._log(f"TaoGrid Lean Algorithm initialized: {self.config.name}")
 
     def _log(self, message: str) -> None:
@@ -242,9 +245,13 @@ class TaoGridLeanAlgorithm:
             # No limit order triggered, save current price for next bar
             self._prev_price = current_price
             # Log when no order is triggered (only occasionally to avoid spam)
-            if getattr(self.config, "enable_console_log", False) and getattr(self, "_current_bar_index", 0) % 1000 == 0:
+            # In live trading, _current_bar_index may be None, so handle it safely
+            bar_idx = getattr(self, "_current_bar_index", 0)
+            if bar_idx is None:
+                bar_idx = 0
+            if getattr(self.config, "enable_console_log", False) and isinstance(bar_idx, int) and bar_idx % 1000 == 0:
                 pending_count = len(self.grid_manager.pending_limit_orders)
-                print(f"[ORDER_TRIGGER] Bar {getattr(self, '_current_bar_index', 0)} @ {current_time}: No order triggered (pending_orders={pending_count}, price=${current_price:,.0f})")
+                print(f"[ORDER_TRIGGER] Bar {bar_idx} @ {current_time}: No order triggered (pending_orders={pending_count}, price=${current_price:,.0f})")
             return None  # No trigger, do nothing
 
         direction = triggered_order['direction']
