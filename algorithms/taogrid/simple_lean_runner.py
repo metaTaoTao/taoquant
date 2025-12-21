@@ -78,6 +78,7 @@ class SimpleLeanRunner:
         # internal cooldown state
         self._buy_cooldown_until: datetime | None = None
         self._spacing_pct_est: float | None = None
+        self._last_mid_shift_bar_index: int = -10**9
 
         self.algorithm = TaoGridLeanAlgorithm(config)
 
@@ -93,8 +94,16 @@ class SimpleLeanRunner:
 
         # Portfolio state
         self.cash = config.initial_cash
-        self.holdings = 0.0  # BTC quantity
-        self.total_cost_basis = 0.0  # Total cost basis for unrealized PnL calculation
+        # Position books (separate long/short to support hedge overlay)
+        self.long_holdings = 0.0   # BTC quantity (>=0)
+        self.short_holdings = 0.0  # BTC quantity (>=0)
+        # Backward-compatible net holdings view (long - short)
+        self.holdings = 0.0
+        # Long/short cost basis:
+        # - For long: sum(size * entry_price)
+        # - For short: sum(size * entry_price) for open shorts (used for unrealized PnL)
+        self.total_cost_basis = 0.0  # long cost basis
+        self.total_short_entry_value = 0.0  # short entry value for open shorts
         # Track margin-style leverage with negative cash allowed (simplified perp model)
         
         # Grid position tracking (FIFO queue for pairing)
@@ -364,15 +373,47 @@ class SimpleLeanRunner:
                 'minutes_to_funding': row.get('minutes_to_funding', np.nan),
             }
 
-            # Prepare portfolio state
-            current_equity = self.cash + (self.holdings * row['close'])
-            # Calculate unrealized PnL: current value - cost basis
-            current_value = self.holdings * row['close']
-            unrealized_pnl = current_value - self.total_cost_basis
+            # Optional: Mid shift (recenter grid) when market stays in upper/lower band AND we are flat.
+            # Designed to capture "high-band oscillation" alpha in long-only mode.
+            # Safety: only recenter when flat (no holdings + no open buy_positions) to avoid breaking pairing.
+            if getattr(self.config, "enable_mid_shift", False) and int(getattr(self.config, "mid_shift_threshold", 0)) > 0:
+                cooldown = int(getattr(self.config, "mid_shift_threshold", 0))
+                if (i - self._last_mid_shift_bar_index) >= cooldown:
+                    rp = float(row.get("range_pos", 0.5))
+                    trigger = float(getattr(self.config, "mid_shift_range_pos_trigger", 0.15))
+                    flat_thr = float(getattr(self.config, "mid_shift_flat_holdings_btc", 0.0005))
+                    is_flat = (abs(float(self.long_holdings)) <= flat_thr) and (abs(float(self.short_holdings)) <= flat_thr)
+                    no_positions = sum(len(v) for v in self.algorithm.grid_manager.buy_positions.values()) == 0
+                    if is_flat and no_positions and abs(rp - 0.5) >= trigger:
+                        window = data.loc[:timestamp].tail(100)
+                        if len(window) >= 50:
+                            self.algorithm.grid_manager.setup_grid(window)
+                            # Reset spacing estimate (grid changed)
+                            self._spacing_pct_est = None
+                            self._ensure_spacing_estimate()
+                            self._last_mid_shift_bar_index = i
+                            if self.verbose:
+                                print(
+                                    f"\n[MID_SHIFT] Bar {i} @ {timestamp}: recentered grid "
+                                    f"(range_pos={rp:.2f}, price={float(row['close']):,.0f})"
+                                )
+
+            # Prepare portfolio state (separate long/short books)
+            price = float(row["close"])
+            current_equity = self.cash + (self.long_holdings * price) - (self.short_holdings * price)
+            # Calculate unrealized PnL for a simplified perp model:
+            # - Long PnL: (long_value - long_cost_basis)
+            # - Short PnL: (short_entry_value - short_value)
+            long_value = float(self.long_holdings) * price
+            short_value = float(self.short_holdings) * price
+            unrealized_pnl = (long_value - float(self.total_cost_basis)) + (float(self.total_short_entry_value) - short_value)
             portfolio_state = {
                 'equity': current_equity,
                 'cash': self.cash,
-                'holdings': self.holdings,
+                # keep net holdings for legacy code paths
+                'holdings': float(self.long_holdings) - float(self.short_holdings),
+                'long_holdings': float(self.long_holdings),
+                'short_holdings': float(self.short_holdings),
                 'unrealized_pnl': unrealized_pnl,
             }
 
@@ -400,9 +441,13 @@ class SimpleLeanRunner:
                 (abs(unrealized_pnl) > current_equity * 0.2 or 
                  self.algorithm.grid_manager.risk_level >= 3)):
                 unrealized_pnl_pct = (unrealized_pnl / current_equity) if current_equity > 0 else 0.0
-                print(f"[DEBUG {timestamp}] equity=${current_equity:,.2f} holdings={self.holdings:.4f} "
+                net_holdings = float(self.long_holdings) - float(self.short_holdings)
+                print(
+                    f"[DEBUG {timestamp}] equity=${current_equity:,.2f} "
+                    f"long={self.long_holdings:.4f} short={self.short_holdings:.4f} net={net_holdings:.4f} "
                       f"cost_basis=${self.total_cost_basis:,.2f} unrealized_pnl=${unrealized_pnl:,.2f} "
-                      f"({unrealized_pnl_pct:.2%}) price=${row['close']:,.2f}")
+                    f"({unrealized_pnl_pct:.2%}) price=${row['close']:,.2f}"
+                )
 
             # Process with TaoGrid algorithm (allow multiple fills per bar, bounded)
             fills_this_bar = 0
@@ -438,7 +483,9 @@ class SimpleLeanRunner:
                     fills_this_bar += 1
                     if order["direction"] == "buy":
                         buy_fills_this_bar += 1
-                        buy_notional_added_this_bar += float(order["quantity"]) * float(order["price"])
+                        # Market orders have price=None; use current close as proxy notional.
+                        px = float(order["price"]) if order.get("price") is not None else float(row["close"])
+                        buy_notional_added_this_bar += float(order["quantity"]) * px
 
                     if getattr(self.config, "enable_console_log", False):
                         print(f"[ORDER_EXECUTE] {order['direction'].upper()} L{order['level']+1} EXECUTED successfully")
@@ -447,20 +494,25 @@ class SimpleLeanRunner:
                     self.algorithm.on_order_filled(order)
 
                     # Keep grid_manager state consistent for trade recording
-                    if order['direction'] == 'sell':
+                    if order['direction'] == 'sell' and order.get("leg") is None:
                         _ = self.algorithm.grid_manager.match_sell_order(
                             sell_level_index=order['level'],
                             sell_size=order['quantity']
                         )
 
                     # Refresh portfolio_state for possible next fill in the same bar
-                    current_equity = self.cash + (self.holdings * row['close'])
-                    current_value = self.holdings * row['close']
-                    unrealized_pnl = current_value - self.total_cost_basis
+                    price = float(row["close"])
+                    self.holdings = float(self.long_holdings) - float(self.short_holdings)
+                    current_equity = self.cash + (self.long_holdings * price) - (self.short_holdings * price)
+                    long_value = float(self.long_holdings) * price
+                    short_value = float(self.short_holdings) * price
+                    unrealized_pnl = (long_value - float(self.total_cost_basis)) + (float(self.total_short_entry_value) - short_value)
                     portfolio_state = {
                         'equity': current_equity,
                         'cash': self.cash,
-                        'holdings': self.holdings,
+                        'holdings': float(self.long_holdings) - float(self.short_holdings),
+                        'long_holdings': float(self.long_holdings),
+                        'short_holdings': float(self.short_holdings),
                         'unrealized_pnl': unrealized_pnl,
                     }
 
@@ -496,8 +548,14 @@ class SimpleLeanRunner:
                     'timestamp': timestamp,
                     'equity': current_equity,
                     'cash': self.cash,
-                    'holdings': self.holdings,
-                    'holdings_value': self.holdings * row['close'],
+                    'holdings': float(self.long_holdings) - float(self.short_holdings),
+                    'holdings_value': (float(self.long_holdings) - float(self.short_holdings)) * float(row['close']),
+                    'unrealized_pnl': unrealized_pnl,  # CRITICAL: Add for risk control diagnosis
+                    'long_holdings': float(self.long_holdings),
+                    'short_holdings': float(self.short_holdings),
+                    'cost_basis': float(self.total_cost_basis),
+                    'grid_enabled': self.algorithm.grid_manager.grid_enabled,
+                    'risk_level': self.algorithm.grid_manager.risk_level,
                 })
             else:
                 self._equity_timestamps.append(timestamp)
@@ -553,6 +611,7 @@ class SimpleLeanRunner:
         size = order['quantity']
         level = order.get('level', -1)  # Grid level index
         grid_level_price = order.get('price')  # Grid level price (trigger price)
+        leg = order.get("leg")
         
         # Execution price for LIMIT orders on OHLC bars:
         # - Buy limit: if bar opens below limit, you get filled at open (better); else at limit
@@ -572,6 +631,125 @@ class SimpleLeanRunner:
         commission_rate = float(self.config.maker_fee)
         slippage_rate = 0.0  # 0% - limit orders execute at grid level price, no slippage
 
+        if leg == "short_open" and direction == "sell":
+            # OPEN SHORT (sell to open)
+            proceeds = size * execution_price
+            commission = proceeds * commission_rate
+            slippage = proceeds * slippage_rate
+            net_proceeds = proceeds - commission - slippage
+
+            # Margin constraint (gross exposure): (long_notional + short_notional) <= equity * leverage
+            equity = self.cash + (float(self.long_holdings) * float(market_price)) - (float(self.short_holdings) * float(market_price))
+            max_notional = equity * float(self.config.leverage)
+            new_gross_notional = (float(self.long_holdings) * float(market_price)) + ((float(self.short_holdings) + float(size)) * float(market_price))
+            if equity > 0 and new_gross_notional <= max_notional:
+                self.cash += net_proceeds
+                self.short_holdings += float(size)
+                self.holdings = float(self.long_holdings) - float(self.short_holdings)
+                self.total_short_entry_value += size * execution_price
+                self.short_positions.append({
+                    "size": size,
+                    "price": execution_price,
+                    "level": level,
+                    "timestamp": timestamp,
+                    "entry_proceeds": net_proceeds,
+                })
+                self.orders.append({
+                    "timestamp": timestamp,
+                    "direction": "sell",
+                    "size": size,
+                    "price": execution_price,
+                    "level": level,
+                    "market_price": market_price,
+                    "proceeds": net_proceeds,
+                    "commission": commission,
+                    "slippage": slippage,
+                    "leg": "short_open",
+                })
+                return True
+            return False
+
+        if leg == "short_cover" and direction == "buy":
+            # COVER SHORT (buy to close)
+            if float(self.short_holdings) <= 1e-12:
+                return False
+            cover_size = min(float(size), float(self.short_holdings))
+
+            cost = cover_size * execution_price
+            commission = cost * commission_rate
+            slippage = cost * slippage_rate
+            total_cost = cost + commission + slippage
+
+            # Allow margin-style cover (cash can go negative), constrained by gross exposure <= equity * leverage.
+            equity = self.cash + (float(self.long_holdings) * float(market_price)) - (float(self.short_holdings) * float(market_price))
+            max_notional = equity * float(self.config.leverage)
+            new_gross_notional = (float(self.long_holdings) * float(market_price)) + (max(0.0, float(self.short_holdings) - float(cover_size)) * float(market_price))
+            if not (equity > 0 and new_gross_notional <= max_notional):
+                return False
+
+            self.cash -= total_cost
+            self.short_holdings = max(0.0, float(self.short_holdings) - float(cover_size))
+            self.holdings = float(self.long_holdings) - float(self.short_holdings)
+
+            remaining = cover_size
+            total_entry_value_reduction = 0.0
+            matched_trades = []
+            while remaining > 0.0001 and self.short_positions:
+                pos = self.short_positions[0]
+                pos_size = float(pos["size"])
+                matched = min(remaining, pos_size)
+                sell_price = float(pos["price"])
+                sell_ts = pos["timestamp"]
+                entry_proceeds = float(pos.get("entry_proceeds", matched * sell_price))
+
+                entry_proceeds_portion = (matched / pos_size) * entry_proceeds if pos_size > 0 else 0.0
+                exit_cost_portion = (matched / cover_size) * total_cost if cover_size > 0 else 0.0
+
+                pnl = entry_proceeds_portion - exit_cost_portion
+                # return based on short notional at entry
+                denom = matched * sell_price if sell_price > 0 else 0.0
+                ret = pnl / denom if denom > 0 else 0.0
+
+                matched_trades.append({
+                    "entry_timestamp": sell_ts,
+                    "exit_timestamp": timestamp,
+                    "entry_price": sell_price,
+                    "exit_price": execution_price,
+                    "entry_level": int(pos.get("level", -1)),
+                    "exit_level": level,
+                    "size": matched,
+                    "pnl": pnl,
+                    "return_pct": ret,
+                    "holding_period": (timestamp - sell_ts).total_seconds() / 3600,
+                    "direction": "short",
+                })
+
+                total_entry_value_reduction += matched * sell_price
+
+                pos["size"] -= matched
+                pos["entry_proceeds"] = entry_proceeds - entry_proceeds_portion
+                remaining -= matched
+                if pos["size"] < 0.0001:
+                    self.short_positions.pop(0)
+
+            self.total_short_entry_value = max(0.0, float(self.total_short_entry_value) - total_entry_value_reduction)
+            self.trades.extend(matched_trades)
+
+            self.orders.append({
+                "timestamp": timestamp,
+                "direction": "buy",
+                "size": cover_size,
+                "price": execution_price,
+                "level": level,
+                "market_price": market_price,
+                "cost": total_cost,
+                "commission": commission,
+                "slippage": slippage,
+                "matched_trades": len(matched_trades),
+                "leg": "short_cover",
+            })
+            return True
+
         if direction == 'buy':
             # Buy BTC - Add to long positions queue
             cost = size * execution_price
@@ -580,13 +758,14 @@ class SimpleLeanRunner:
             total_cost = cost + commission + slippage
 
             # Leverage / margin constraint (simplified):
-            # Allow cash to go negative, but constrain position notional by equity * leverage.
-            equity = self.cash + (self.holdings * market_price)
+            # Allow cash to go negative, but constrain gross exposure by equity * leverage.
+            equity = self.cash + (float(self.long_holdings) * float(market_price)) - (float(self.short_holdings) * float(market_price))
             max_notional = equity * float(self.config.leverage)
-            new_notional = abs(self.holdings + size) * market_price
-            if equity > 0 and new_notional <= max_notional:
+            new_gross_notional = ((float(self.long_holdings) + float(size)) * float(market_price)) + (float(self.short_holdings) * float(market_price))
+            if equity > 0 and new_gross_notional <= max_notional:
                 self.cash -= total_cost
-                self.holdings += size
+                self.long_holdings += float(size)
+                self.holdings = float(self.long_holdings) - float(self.short_holdings)
                 # Update cost basis for unrealized PnL tracking
                 self.total_cost_basis += size * execution_price
 
@@ -601,7 +780,7 @@ class SimpleLeanRunner:
                 
                 # Log buy execution
                 if getattr(self.config, "enable_console_log", False):
-                    print(f"[BUY_EXECUTED] L{level+1} @ ${execution_price:,.0f}, size={size:.4f} BTC, holdings={self.holdings:.4f}, long_positions_count={len(self.long_positions)}, cost_basis=${self.total_cost_basis:,.0f}")
+                    print(f"[BUY_EXECUTED] L{level+1} @ ${execution_price:,.0f}, size={size:.4f} BTC, long={self.long_holdings:.4f}, short={self.short_holdings:.4f}, net={self.holdings:.4f}, long_positions_count={len(self.long_positions)}, cost_basis=${self.total_cost_basis:,.0f}")
 
                 # Record buy order to orders list
                 self.orders.append({
@@ -614,6 +793,7 @@ class SimpleLeanRunner:
                     'cost': total_cost,
                     'commission': commission,
                     'slippage': slippage,
+                    'leg': leg,
                     # factor diagnostics
                     'mr_z': float(order.get('mr_z')) if order.get('mr_z') is not None else np.nan,
                     'trend_score': float(order.get('trend_score')) if order.get('trend_score') is not None else np.nan,
@@ -634,14 +814,15 @@ class SimpleLeanRunner:
 
         elif direction == 'sell':
             # Sell BTC - Match against long positions using GRID PAIRING
-            if size <= self.holdings:
+            if float(size) <= float(self.long_holdings):
                 proceeds = size * execution_price
                 commission = proceeds * commission_rate
                 slippage = proceeds * slippage_rate
                 net_proceeds = proceeds - commission - slippage
 
                 self.cash += net_proceeds
-                self.holdings -= size
+                self.long_holdings = max(0.0, float(self.long_holdings) - float(size))
+                self.holdings = float(self.long_holdings) - float(self.short_holdings)
                 
                 # Track total cost basis reduction for accurate unrealized PnL calculation
                 total_cost_basis_reduction = 0.0
@@ -781,8 +962,8 @@ class SimpleLeanRunner:
                 # Ensure cost basis doesn't go negative
                 self.total_cost_basis = max(0.0, self.total_cost_basis)
                 
-                # Safety check: if holdings is zero, cost basis should also be zero
-                if abs(self.holdings) < 1e-8:
+                # Safety check: if long holdings is zero, long cost basis should also be zero
+                if abs(float(self.long_holdings)) < 1e-8:
                     self.total_cost_basis = 0.0
 
                 # Record all matched trades
@@ -790,7 +971,7 @@ class SimpleLeanRunner:
                 
                 # Log trade recording and sell execution
                 if getattr(self.config, "enable_console_log", False):
-                    print(f"[SELL_EXECUTED] L{level+1} @ ${execution_price:,.0f}, size={size:.4f} BTC, holdings={self.holdings:.4f}, long_positions_count={len(self.long_positions)}, cost_basis=${self.total_cost_basis:,.0f}")
+                    print(f"[SELL_EXECUTED] L{level+1} @ ${execution_price:,.0f}, size={size:.4f} BTC, long={self.long_holdings:.4f}, short={self.short_holdings:.4f}, net={self.holdings:.4f}, long_positions_count={len(self.long_positions)}, cost_basis=${self.total_cost_basis:,.0f}")
                     print(f"[TRADE_RECORD] SELL L{level+1} @ ${execution_price:,.0f} - recorded {len(matched_trades)} matched trades (total trades now: {len(self.trades)})")
                     if len(matched_trades) == 0:
                         print(f"[WARNING] SELL L{level+1} executed but no trades recorded! This should not happen.")
@@ -806,6 +987,7 @@ class SimpleLeanRunner:
                     'commission': commission,
                     'slippage': slippage,
                     'matched_trades': len(matched_trades),
+                    'leg': leg,
                     # factor diagnostics
                     'mr_z': float(order.get('mr_z')) if order.get('mr_z') is not None else np.nan,
                     'trend_score': float(order.get('trend_score')) if order.get('trend_score') is not None else np.nan,

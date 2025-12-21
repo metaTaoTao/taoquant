@@ -102,6 +102,7 @@ class GridManager:
         # ATR tracking for spacing calculation
         self.current_atr: float = 0.0
         self.avg_atr: float = 0.0
+        self._last_close: float | None = None
 
         # Track filled grid levels to avoid re-triggering
         # Key: "buy_L1", "sell_L2", etc.
@@ -113,6 +114,11 @@ class GridManager:
         # Value: list of positions with size and target sell level
         # Each position: {'size': float, 'buy_price': float, 'target_sell_level': int}
         self.buy_positions: Dict[int, List[dict]] = {}
+
+        # Track short positions (only used when short leg is enabled in BEARISH regime)
+        # Key: sell_level_index (int)
+        # Value: list of positions: {'size': float, 'sell_price': float, 'target_buy_level': int}
+        self.short_positions: Dict[int, List[dict]] = {}
         
         # Pending limit orders (true grid strategy: place orders and wait for them to be hit)
         # Each order: {
@@ -152,9 +158,25 @@ class GridManager:
         )
         self.current_atr = atr.iloc[-1]
         self.avg_atr = atr.mean()
+        try:
+            self._last_close = float(historical_data["close"].iloc[-1])
+        except Exception:
+            self._last_close = None
 
         # Calculate mid price
+        # Default: static mid = (support + resistance) / 2
         mid = (self.config.support + self.config.resistance) / 2
+        # Optional: mid shift (initialize grid centered closer to current market)
+        # NOTE: We only use this at grid setup time; dynamic mid shifting is handled
+        # by runner logic and is only allowed when flat, to avoid breaking pairing ledger.
+        if getattr(self.config, "enable_mid_shift", False) and historical_data is not None and len(historical_data) > 0:
+            last_close = float(historical_data["close"].iloc[-1])
+            if last_close > 0:
+                # clamp mid inside (support, resistance) with cushion buffer
+                lo = float(self.config.support) + float(self.current_atr) * float(self.config.cushion_multiplier)
+                hi = float(self.config.resistance) - float(self.current_atr) * float(self.config.cushion_multiplier)
+                if lo < hi:
+                    mid = float(min(hi, max(lo, last_close)))
 
         # Calculate cushion (volatility buffer)
         cushion = self.current_atr * self.config.cushion_multiplier
@@ -229,8 +251,14 @@ class GridManager:
         self.buy_weights = self.buy_weights * buy_ratio
         self.sell_weights = self.sell_weights * sell_ratio
         
-        # Initialize pending limit orders: place buy orders at all buy levels
+        # Initialize pending limit orders:
+        # - long-only mode: place BUY orders at buy levels
+        # - short mode (BEARISH only): place SELL orders at sell levels
         self._initialize_pending_orders()
+
+    def _short_mode_enabled(self) -> bool:
+        """Return True if short leg is enabled for current config/regime."""
+        return bool(getattr(self.config, "enable_short_in_bearish", False)) and getattr(self.config, "regime", "") == "BEARISH_RANGE"
 
     def get_grid_info(self) -> Dict[str, any]:
         """
@@ -280,20 +308,47 @@ class GridManager:
         
         if self.buy_levels is None:
             return
-        
-        # Place buy limit orders at all buy levels
+
+        # Always keep the long-only core grid entry orders (BUYs).
         for i, level_price in enumerate(self.buy_levels):
             level_key = f"buy_L{i+1}"
-            # Only place if not already filled
             if not self.filled_levels.get(level_key, False):
                 self.pending_limit_orders.append({
-                    'direction': 'buy',
-                    'level_index': i,
-                    'price': level_price,
-                    'size': None,  # Will be calculated when order is triggered
-                    'placed': True,
-                    'last_checked_bar': None,  # Track which bar we last checked
+                    "direction": "buy",
+                    "level_index": i,
+                    "price": float(level_price),
+                    "size": None,
+                    "placed": True,
+                    "last_checked_bar": None,
+                    # leg is omitted => treated as core long grid
                 })
+
+        # Optional: add ONE short overlay entry order (SELL to open) in BEARISH regime.
+        if self._short_mode_enabled():
+            if self.sell_levels is None or len(self.sell_levels) == 0:
+                return
+            # For opening shorts with a SELL limit, place the overlay in the "high band" rather than near mid.
+            # This aligns with trader intent: only short when price is high within the range.
+            band_rp = float(getattr(self.config, "short_range_pos_trigger", 0.75))
+            trigger_price = float(self.config.support) + band_rp * (float(self.config.resistance) - float(self.config.support))
+            idx = None
+            for i, level_price in enumerate(self.sell_levels):
+                if float(level_price) >= float(trigger_price):
+                    idx = i
+                    break
+            if idx is None:
+                # If price is above all sell levels (rare), use the highest level
+                idx = len(self.sell_levels) - 1
+            level_price = float(self.sell_levels[idx])
+            self.pending_limit_orders.append({
+                "direction": "sell",
+                "level_index": int(idx),
+                "price": float(level_price),
+                "size": None,
+                "placed": True,
+                "last_checked_bar": None,
+                "leg": "short_open",
+            })
     
     def check_limit_order_triggers(
         self, 
@@ -301,7 +356,8 @@ class GridManager:
         prev_price: Optional[float] = None,
         bar_high: Optional[float] = None,
         bar_low: Optional[float] = None,
-        bar_index: Optional[int] = None
+        bar_index: Optional[int] = None,
+        range_pos: float | None = None,
     ) -> Optional[dict]:
         """
         Check if any pending limit order is triggered by price movement.
@@ -336,8 +392,15 @@ class GridManager:
         if not self.pending_limit_orders:
             return None
         
-        # Check each pending limit order
-        for order in self.pending_limit_orders:
+        # Check each pending limit order.
+        # Optional: when in high band, prioritize short overlay entry (short_open) so the "first trade can be short".
+        orders = list(self.pending_limit_orders)
+        if bool(getattr(self.config, "short_priority_in_high_band", True)):
+            rp = float(range_pos) if range_pos is not None and np.isfinite(range_pos) else None
+            if rp is not None and rp >= float(getattr(self.config, "short_range_pos_trigger", 0.75)):
+                orders = sorted(orders, key=lambda o: 0 if o.get("leg") == "short_open" else 1)
+
+        for order in orders:
             if not order.get('placed', False):
                 continue
             
@@ -348,6 +411,7 @@ class GridManager:
             direction = order['direction']
             limit_price = order['price']
             level_index = order['level_index']
+            leg = order.get("leg")
             
             # Avoid duplicate triggers in same bar
             if bar_index is not None and order.get('last_checked_bar') == bar_index:
@@ -356,9 +420,15 @@ class GridManager:
             # Check if limit order is triggered
             triggered = False
             
-            # Core "touch" condition (OHLC-consistent)
+            # OHLC-consistent LIMIT fill condition with "gap-through" support:
+            # - BUY limit fills if bar traded at/below limit => bar_low <= limit_price
+            # - SELL limit fills if bar traded at/above limit => bar_high >= limit_price
+            # This also correctly models gap-through (open beyond the limit) fills.
             if bar_low is not None and bar_high is not None:
-                touched = (bar_low <= limit_price <= bar_high)
+                if direction == "buy":
+                    touched = (bar_low <= limit_price)
+                else:
+                    touched = (bar_high >= limit_price)
             else:
                 # Fallback when high/low are missing: approximate using current price
                 touched = (current_price == limit_price) or (
@@ -369,13 +439,14 @@ class GridManager:
                 # Buy limit: only fills if bar range touches the limit price
                 triggered = touched
                 
-                # Also check if level is already filled
-                level_key = f"buy_L{level_index + 1}"
-                if self.filled_levels.get(level_key, False):
-                    triggered = False
-                    # Log when order is blocked due to filled_levels
-                    if getattr(self.config, "enable_console_log", False):
-                        print(f"[FILLED_LEVELS] BUY L{level_index+1} @ ${limit_price:,.0f} blocked - level already filled (filled_levels count: {len(self.filled_levels)})")
+                # For core long grid BUYs, block if the level is already filled.
+                # For short covers, DO NOT apply filled_levels gating.
+                if leg != "short_cover":
+                    level_key = f"buy_L{level_index + 1}"
+                    if self.filled_levels.get(level_key, False):
+                        triggered = False
+                        if getattr(self.config, "enable_console_log", False):
+                            print(f"[FILLED_LEVELS] BUY L{level_index+1} @ ${limit_price:,.0f} blocked - level already filled (filled_levels count: {len(self.filled_levels)})")
                 elif not touched and getattr(self.config, "enable_console_log", False):
                     # Log when order is not triggered due to price not touching
                     print(f"[ORDER_TRIGGER] BUY L{level_index+1} @ ${limit_price:,.0f} not triggered - price not touched (current: ${current_price:,.0f}, bar: ${bar_low:,.0f}-${bar_high:,.0f})")
@@ -384,21 +455,25 @@ class GridManager:
                 # Sell limit: only fills if bar range touches the limit price
                 triggered = touched
 
-                # Traditional Grid: FREE SELL (not forced pairing)
-                # Sell whenever we have long positions AND price reaches sell level
-                # No need to match specific buy[i] -> sell[i]
-                # This maximizes turnover and captures all profitable opportunities
-
-                # Check if we have ANY long position
                 inventory_state = self.inventory_tracker.get_state()
-                if inventory_state.long_exposure > 0:
-                    # We have long positions, can sell
-                    pass  # Keep triggered as is
+                if leg == "short_open":
+                    # Short mode: SELL opens short inventory.
+                    # Safety: do not open shorts if we still have long exposure (avoid dual exposure).
+                    flat_thr = float(getattr(self.config, "short_flat_holdings_btc", 0.0005))
+                    if abs(float(inventory_state.long_exposure)) > flat_thr:
+                        triggered = False
+                    # Do not stack shorts: only allow one short position at a time (by default).
+                    max_conc = int(getattr(self.config, "short_max_concurrent_positions", 1))
+                    if max_conc <= 1 and float(inventory_state.short_exposure) > flat_thr:
+                        triggered = False
                 else:
-                    # No long positions, cannot sell
-                    triggered = False
-                    if getattr(self.config, "enable_console_log", False):
-                        print(f"[ORDER_TRIGGER] SELL L{level_index+1} @ ${limit_price:,.0f} not triggered - no long positions (long_exposure: {inventory_state.long_exposure:.4f})")
+                    # Long-only mode: SELL closes long inventory (requires holdings)
+                    if inventory_state.long_exposure > 0:
+                        pass
+                    else:
+                        triggered = False
+                        if getattr(self.config, "enable_console_log", False):
+                            print(f"[ORDER_TRIGGER] SELL L{level_index+1} @ ${limit_price:,.0f} not triggered - no long positions (long_exposure: {inventory_state.long_exposure:.4f})")
                 if not touched and getattr(self.config, "enable_console_log", False):
                     # Log when order is not triggered due to price not touching
                     print(f"[ORDER_TRIGGER] SELL L{level_index+1} @ ${limit_price:,.0f} not triggered - price not touched (current: ${current_price:,.0f}, bar: ${bar_low:,.0f}-${bar_high:,.0f})")
@@ -417,7 +492,7 @@ class GridManager:
         
         return None
     
-    def remove_pending_order(self, direction: str, level_index: int) -> None:
+    def remove_pending_order(self, direction: str, level_index: int, leg: str | None = None) -> None:
         """
         Remove a pending limit order after it's been filled.
 
@@ -431,7 +506,11 @@ class GridManager:
         before_count = len(self.pending_limit_orders)
         self.pending_limit_orders = [
             order for order in self.pending_limit_orders
-            if not (order['direction'] == direction and order['level_index'] == level_index)
+            if not (
+                order.get("direction") == direction
+                and int(order.get("level_index", -999999)) == int(level_index)
+                and order.get("leg") == leg
+            )
         ]
         after_count = len(self.pending_limit_orders)
         
@@ -454,6 +533,7 @@ class GridManager:
         level_index: int,
         level_price: float,
         bar_index: Optional[int] = None,
+        leg: str | None = None,
     ) -> None:
         """
         Place a new pending limit order after a position is filled.
@@ -472,7 +552,11 @@ class GridManager:
         """
         # Check if order already exists
         for order in self.pending_limit_orders:
-            if order['direction'] == direction and order['level_index'] == level_index:
+            if (
+                order.get("direction") == direction
+                and int(order.get("level_index", -999999)) == int(level_index)
+                and order.get("leg") == leg
+            ):
                 if getattr(self.config, "enable_console_log", False):
                     print(f"[PENDING_ORDER] {direction.upper()} L{level_index+1} @ ${level_price:,.0f} already exists, skipping")
                 return  # Already exists
@@ -489,6 +573,7 @@ class GridManager:
             # set last_checked_bar=bar_index to prevent it from triggering
             # in the SAME bar (more realistic for event-driven execution).
             'last_checked_bar': bar_index,
+            'leg': leg,
         })
         
         # Log order placement
@@ -516,6 +601,7 @@ class GridManager:
         daily_pnl: float,
         risk_budget: float,
         holdings_btc: float,
+        order_leg: str | None = None,
         current_price: float | None = None,
         mr_z: float | None = None,
         trend_score: float | None = None,
@@ -596,6 +682,7 @@ class GridManager:
         # - If inventory is too high, block new BUYs (de-risk).
         # - Otherwise, progressively reduce BUY size as inventory rises.
         inventory_state = self.inventory_tracker.get_state()
+        short_mode = order_leg in ("short_open", "short_cover")
         # Notional inventory ratio (more relevant for perp/leverage than raw BTC units):
         # inv_ratio = |position_notional| / equity
         equity_for_inv = float(equity)
@@ -643,6 +730,30 @@ class GridManager:
                             reason="Cost-basis risk zone (price below avg_cost threshold)",
                         )
                     base_size_btc = base_size_btc * buy_mult
+        if direction == "buy" and order_leg == "short_cover":
+            # In short mode, BUY is used to COVER shorts.
+            # It must NOT be blocked by long-inventory gates, otherwise shorts can never be closed.
+            target_short_size = 0.0
+            for sell_level_idx, positions in self.short_positions.items():
+                for pos in positions:
+                    if int(pos.get("target_buy_level", -1)) == int(level_index):
+                        target_short_size += float(pos.get("size", 0.0))
+            if target_short_size > 0:
+                # Cover is risk-reducing: prioritize fully closing the matched short inventory.
+                base_size_btc = max(0.0, float(target_short_size))
+            else:
+                # Fallback: cover as much as current short holdings
+                base_size_btc = max(0.0, abs(float(holdings_btc)))
+
+            # Covers are risk-reducing: DO NOT throttle or block them.
+            from risk_management.grid_risk_manager import ThrottleStatus
+            size_btc = base_size_btc
+            throttle_status = ThrottleStatus(size_multiplier=1.0, reason="Short cover")
+
+            if getattr(self.config, "enable_console_log", False):
+                print(f"[ORDER_SIZE] BUY(COVER) L{level_index+1} @ ${level_price:,.0f} - FINAL SIZE={size_btc:.4f} BTC")
+            return size_btc, throttle_status
+
         if direction == "buy":
             if inv_ratio >= inv_ratio_threshold:
                 from risk_management.grid_risk_manager import ThrottleStatus
@@ -790,6 +901,34 @@ class GridManager:
             rp = float(range_pos) if range_pos is not None and np.isfinite(range_pos) else 0.5
             rp = min(1.0, max(0.0, rp))
 
+            # Short overlay: SELL(leg=short_open) opens short, so protect right-tail with breakout_risk_up.
+            if order_leg == "short_open" and getattr(self.config, "enable_breakout_risk_factor", True):
+                from risk_management.grid_risk_manager import ThrottleStatus
+                br_up = float(breakout_risk_up) if breakout_risk_up is not None and np.isfinite(breakout_risk_up) else 0.0
+                if br_up >= float(getattr(self.config, "short_breakout_block_threshold", 0.95)):
+                    return 0.0, ThrottleStatus(
+                        size_multiplier=0.0,
+                        reason="Short blocked (upside breakout risk)",
+                    )
+                # Only allow short overlay in the high band of the range.
+                if rp < float(getattr(self.config, "short_range_pos_trigger", 0.75)):
+                    return 0.0, ThrottleStatus(
+                        size_multiplier=0.0,
+                        reason="Short blocked (not in high band)",
+                    )
+
+            if short_mode:
+                # In short mode, SELL opens shorts. Enforce inventory cap on short notional.
+                if inv_ratio >= inv_ratio_threshold:
+                    from risk_management.grid_risk_manager import ThrottleStatus
+                    return 0.0, ThrottleStatus(
+                        size_multiplier=0.0,
+                        reason="Short inventory de-risk (notional_ratio>=capacity_threshold)",
+                    )
+                # Cap by remaining short unit capacity (base currency units)
+                avail = float(self.inventory_tracker.get_available_capacity("short"))
+                base_size_btc = min(base_size_btc, max(0.0, avail))
+
             # Funding factor: boost sell aggressiveness when funding positive (longs pay).
             if getattr(self.config, "enable_funding_factor", False) and getattr(self.config, "funding_apply_to_sell", True):
                 fr = float(funding_rate) if funding_rate is not None and np.isfinite(funding_rate) else 0.0
@@ -818,7 +957,7 @@ class GridManager:
                     base_size_btc = base_size_btc * float(self.config.vol_sell_mult_high)
             
             # Market Maker Risk Zone: tiered risk management for SELL
-            if in_risk_zone:
+            if in_risk_zone and not short_mode:
                 # Apply risk level multipliers
                 if self.risk_level == 3:
                     # Level 3: Severe risk
@@ -831,28 +970,22 @@ class GridManager:
                     mm_sell_mult = float(getattr(self.config, "mm_risk_level1_sell_mult", 3.0))
                 base_size_btc = base_size_btc * mm_sell_mult
             
-            # BUG FIX: Limit sell size to corresponding buy position size
-            # This prevents sell size amplification from causing FIFO fallback and wrong pairing
-            # Grid strategy should maintain buy/sell symmetry: sell[i] should only sell buy[i] positions
-            target_buy_size = 0.0
-            for buy_level_idx, positions in self.buy_positions.items():
-                for pos in positions:
-                    if pos.get('target_sell_level') == level_index:
-                        target_buy_size += pos['size']
-            
-            # Limit sell size to corresponding buy position size (if found)
-            # This ensures grid pairing correctness and prevents wrong matches
-            if target_buy_size > 0:
-                size_before_limit = base_size_btc
-                base_size_btc = min(base_size_btc, target_buy_size)
-                if getattr(self.config, "enable_console_log", False) and size_before_limit > target_buy_size:
-                    print(f"[ORDER_SIZE] SELL L{level_index+1} size limited to buy position size: {base_size_btc:.4f} BTC (was {size_before_limit:.4f} BTC before limit, buy position size: {target_buy_size:.4f} BTC)")
-            else:
-                # Fallback: if no matching buy position found, limit to total holdings
-                # This can happen if buy position was already matched or if there's a mismatch
-                base_size_btc = min(base_size_btc, max(0.0, float(holdings_btc)))
-                if getattr(self.config, "enable_console_log", False):
-                    print(f"[ORDER_SIZE] SELL L{level_index+1} no matching buy position found, limiting to holdings: {base_size_btc:.4f} BTC")
+            if not short_mode:
+                # Long-only mode: Limit sell size to corresponding buy position size (pairing correctness)
+                target_buy_size = 0.0
+                for buy_level_idx, positions in self.buy_positions.items():
+                    for pos in positions:
+                        if pos.get('target_sell_level') == level_index:
+                            target_buy_size += pos['size']
+                if target_buy_size > 0:
+                    size_before_limit = base_size_btc
+                    base_size_btc = min(base_size_btc, target_buy_size)
+                    if getattr(self.config, "enable_console_log", False) and size_before_limit > target_buy_size:
+                        print(f"[ORDER_SIZE] SELL L{level_index+1} size limited to buy position size: {base_size_btc:.4f} BTC (was {size_before_limit:.4f} BTC before limit, buy position size: {target_buy_size:.4f} BTC)")
+                else:
+                    base_size_btc = min(base_size_btc, max(0.0, float(holdings_btc)))
+                    if getattr(self.config, "enable_console_log", False):
+                        print(f"[ORDER_SIZE] SELL L{level_index+1} no matching buy position found, limiting to holdings: {base_size_btc:.4f} BTC")
 
         # Apply throttling if enabled
         if self.config.enable_throttling:
@@ -1033,7 +1166,7 @@ class GridManager:
         return None
     
     def update_inventory(
-        self, direction: str, size: float, level_index: int
+        self, direction: str, size: float, level_index: int, order_leg: str | None = None
     ) -> None:
         """
         Update inventory after order execution.
@@ -1050,17 +1183,53 @@ class GridManager:
         level_key = f"{direction}_L{level_index + 1}"
 
         # Update inventory tracker
-        # NOTE: This Lean grid implementation is long-only at the position layer:
-        # - BUY increases long exposure
-        # - SELL reduces long exposure (it is NOT opening a short position)
+        # - Core long grid: BUY increases long exposure, SELL reduces long exposure
+        # - Short overlay: SELL (leg=short_open) increases short exposure, BUY (leg=short_cover) reduces short exposure
+        if order_leg == "short_open":
+            self.inventory_tracker.update(short_size=size, grid_level=level_key)
+            return
+        if order_leg == "short_cover":
+            self.inventory_tracker.update(short_size=-size, grid_level=level_key)
+            return
+
         if direction == "buy":
-            self.inventory_tracker.update(
-                long_size=size, grid_level=level_key
-            )
+            self.inventory_tracker.update(long_size=size, grid_level=level_key)
         else:
-            self.inventory_tracker.update(
-                long_size=-size, grid_level=level_key
-            )
+            self.inventory_tracker.update(long_size=-size, grid_level=level_key)
+
+    def add_short_position(self, sell_level_index: int, size: float, sell_price: float) -> None:
+        """Add a short position (opened by SELL) with target cover buy level."""
+        if sell_level_index not in self.short_positions:
+            self.short_positions[sell_level_index] = []
+        # Cover one level below entry (top-band micro-grid) to avoid "cover all the way to mid".
+        target_buy_level = max(0, int(sell_level_index) - 1)
+        self.short_positions[sell_level_index].append({
+            "size": float(size),
+            "sell_price": float(sell_price),
+            "target_buy_level": int(target_buy_level),
+        })
+
+    def match_cover_order(
+        self, buy_level_index: int, buy_size: float
+    ) -> Optional[Tuple[int, float, float]]:
+        """
+        Match a BUY cover order against short positions.
+
+        Returns:
+            (sell_level_index, sell_price, matched_size) if matched, else None.
+        """
+        for sell_level_idx, positions in list(self.short_positions.items()):
+            for pos_idx, pos in enumerate(positions):
+                if int(pos.get("target_buy_level", -1)) == int(buy_level_index):
+                    matched_size = min(float(buy_size), float(pos["size"]))
+                    sell_price = float(pos["sell_price"])
+                    pos["size"] -= matched_size
+                    if pos["size"] < 0.0001:
+                        positions.pop(pos_idx)
+                    if not positions:
+                        del self.short_positions[sell_level_idx]
+                    return (int(sell_level_idx), sell_price, matched_size)
+        return None
 
     def reset_filled_level(self, direction: str, level_index: int) -> None:
         """

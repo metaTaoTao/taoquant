@@ -79,6 +79,8 @@ class TaoGridLeanAlgorithm:
         # Bar index tracking (for logging, set by runner)
         self._current_bar_index = 0
         self._last_deleverage_bar_index: int = -10**9
+        self._short_cycles_done: int = 0
+        self._last_short_open_bar_index: int = -10**9
 
         self._log(f"TaoGrid Lean Algorithm initialized: {self.config.name}")
 
@@ -207,7 +209,19 @@ class TaoGridLeanAlgorithm:
             unrealized_pnl=unrealized_pnl,
             current_time=current_time,
         )
-        
+
+        # DIAGNOSTIC: Log risk control details when approaching dangerous territory
+        unrealized_pnl_pct = (unrealized_pnl / equity) if equity > 0 else 0.0
+        if abs(unrealized_pnl) > equity * 0.20 or risk_level >= 3 or should_shutdown:
+            holdings = portfolio_state.get("holdings", 0.0)
+            self._log(
+                f"[RISK_CHECK] time={current_time} price=${current_price:,.0f} "
+                f"equity=${equity:,.0f} holdings={holdings:.4f} "
+                f"unrealized_pnl=${unrealized_pnl:,.0f} ({unrealized_pnl_pct:.2%}) "
+                f"risk_level={risk_level} should_shutdown={should_shutdown} "
+                f"grid_enabled={self.grid_manager.grid_enabled} reason={shutdown_reason or 'None'}"
+            )
+
         if should_shutdown:
             self._log(
                 f"[{current_time}] [WARNING] GRID SHUTDOWN: {shutdown_reason} "
@@ -285,6 +299,7 @@ class TaoGridLeanAlgorithm:
             bar_high=bar_high,
             bar_low=bar_low,
             bar_index=getattr(self, "_current_bar_index", None),
+            range_pos=bar_data.get("range_pos"),
         )
 
         if triggered_order is None:
@@ -303,6 +318,7 @@ class TaoGridLeanAlgorithm:
         direction = triggered_order['direction']
         level_index = triggered_order['level_index']
         level_price = triggered_order['price']
+        order_leg = triggered_order.get("leg")
         mr_z = bar_data.get("mr_z")
         trend_score = bar_data.get("trend_score")
         breakout_risk_down = bar_data.get("breakout_risk_down")
@@ -312,9 +328,55 @@ class TaoGridLeanAlgorithm:
         minutes_to_funding = bar_data.get("minutes_to_funding")
         vol_score = bar_data.get("vol_score")
 
+        # Short overlay stop: if right-tail breakout risk is high while we carry short exposure, force cover.
+        if (
+            bool(getattr(self.config, "enable_short_in_bearish", False))
+            and getattr(self.config, "regime", "") == "BEARISH_RANGE"
+            and bool(getattr(self.config, "enable_short_stop_on_upside_breakout", True))
+        ):
+            inv = self.grid_manager.get_inventory_state()
+            short_exposure = float(inv.get("short_exposure", 0.0))
+            br_up = float(breakout_risk_up) if breakout_risk_up is not None else 0.0
+            if short_exposure > 0 and br_up >= float(getattr(self.config, "short_breakout_block_threshold", 0.95)):
+                return {
+                    "symbol": self.symbol,
+                    "direction": "buy",
+                    "quantity": short_exposure,
+                    "price": None,   # market
+                    "level": -2,     # sentinel for short stop
+                    "leg": "short_cover",
+                    "reason": f"Short stop (upside breakout risk={br_up:.2f})",
+                    "timestamp": current_time,
+                }
+
+        # Time stop for short overlay: if short stays open too long, force market cover.
+        if (
+            bool(getattr(self.config, "enable_short_in_bearish", False))
+            and getattr(self.config, "regime", "") == "BEARISH_RANGE"
+        ):
+            inv = self.grid_manager.get_inventory_state()
+            short_exposure = float(inv.get("short_exposure", 0.0))
+            max_hold = int(getattr(self.config, "short_max_hold_bars", 180))
+            bar_idx = int(getattr(self, "_current_bar_index", 0) or 0)
+            if short_exposure > 0 and max_hold > 0 and (bar_idx - int(self._last_short_open_bar_index)) >= max_hold:
+                return {
+                    "symbol": self.symbol,
+                    "direction": "buy",
+                    "quantity": short_exposure,
+                    "price": None,   # market
+                    "level": -3,     # sentinel for short time stop
+                    "leg": "short_cover",
+                    "reason": f"Short time stop (bars_open={bar_idx - int(self._last_short_open_bar_index)})",
+                    "timestamp": current_time,
+                }
+
         # Calculate order size with throttling
         equity = portfolio_state.get("equity", self.config.initial_cash)
-        holdings_btc = portfolio_state.get("holdings", 0.0)
+        # Use separated long/short holdings if provided by execution layer.
+        if order_leg == "short_cover":
+            holdings_btc = -float(portfolio_state.get("short_holdings", 0.0))
+        else:
+            holdings_btc = float(portfolio_state.get("long_holdings", portfolio_state.get("holdings", 0.0)))
         size, throttle_status = self.grid_manager.calculate_order_size(
             direction=direction,
             level_index=level_index,
@@ -323,6 +385,7 @@ class TaoGridLeanAlgorithm:
             daily_pnl=self.daily_pnl,
             risk_budget=self.risk_budget,
             holdings_btc=holdings_btc,
+            order_leg=order_leg,
             current_price=current_price,  # Pass current price for MM risk zone detection
             mr_z=mr_z,
             trend_score=trend_score,
@@ -380,6 +443,7 @@ class TaoGridLeanAlgorithm:
             "level": level_index,
             "reason": throttle_status.reason,
             "timestamp": current_time,
+            "leg": order_leg,
             # Factor state for diagnostics (optional)
             "mr_z": mr_z,
             "trend_score": trend_score,
@@ -415,6 +479,7 @@ class TaoGridLeanAlgorithm:
         size = order["quantity"]
         level = order["level"]
         price = order["price"]
+        leg = order.get("leg")
 
         # Forced deleverage sells are not tied to a grid level.
         # Do not modify pending grid orders or re-entry logic for these.
@@ -425,18 +490,75 @@ class TaoGridLeanAlgorithm:
             self._log(f"  Forced deleverage filled - SELL {size:.4f} BTC @ market (reason: {order.get('reason', '')})")
             return
 
+        # Short stop market cover: clear short overlay state and do NOT place re-entry.
+        if leg == "short_cover" and (level is None or int(level) < 0 or price is None):
+            self.grid_manager.update_inventory("buy", size, int(level) if level is not None else -2, order_leg="short_cover")
+            self.filled_orders.append(order)
+            # Clear all short overlay pending orders
+            self.grid_manager.pending_limit_orders = [
+                o for o in self.grid_manager.pending_limit_orders
+                if o.get("leg") not in ("short_open", "short_cover")
+            ]
+            # Clear short position bookkeeping (pairing map)
+            self.grid_manager.short_positions = {}
+            self.grid_manager.reset_triggered_orders()
+            self._log(f"  Short stop covered - BUY {size:.4f} BTC @ market (reason: {order.get('reason', '')})")
+            return
+
         # Update inventory
-        self.grid_manager.update_inventory(direction, size, level)
+        self.grid_manager.update_inventory(direction, size, level, order_leg=leg)
         
         # Update grid positions (for pairing)
-        if direction == "buy":
+        if leg == "short_open":
+            if direction == "sell":
+                self.grid_manager.add_short_position(
+                    sell_level_index=level,
+                    size=size,
+                    sell_price=price,
+                )
+                self._last_short_open_bar_index = int(getattr(self, "_current_bar_index", 0) or 0)
+                self.grid_manager.remove_pending_order("sell", level, leg="short_open")
+                # Place cover BUY at corresponding buy level
+                if self.grid_manager.sell_levels is not None:
+                    cover_level_idx = max(0, int(level) - 1)
+                    cover_level_idx = min(cover_level_idx, len(self.grid_manager.sell_levels) - 1)
+                    cover_price = float(self.grid_manager.sell_levels[cover_level_idx])
+                    self.grid_manager.place_pending_order(
+                        "buy",
+                        cover_level_idx,
+                        cover_price,
+                        bar_index=getattr(self, "_current_bar_index", None),
+                        leg="short_cover",
+                    )
+                    self._log(f"  Placed cover BUY (short) at SELL_L{cover_level_idx+1} @ ${cover_price:,.0f}")
+        elif leg == "short_cover":
+            if direction == "buy":
+                self.grid_manager.remove_pending_order("buy", level, leg="short_cover")
+                match = self.grid_manager.match_cover_order(buy_level_index=level, buy_size=size)
+                sell_level_idx = match[0] if match is not None else level
+                self._short_cycles_done += 1
+                max_cycles = int(getattr(self.config, "short_max_cycles", 1))
+                if self._short_cycles_done < max_cycles:
+                    if self.grid_manager.sell_levels is not None and sell_level_idx < len(self.grid_manager.sell_levels):
+                        sell_price = self.grid_manager.sell_levels[sell_level_idx]
+                        self.grid_manager.place_pending_order(
+                            "sell",
+                            sell_level_idx,
+                            sell_price,
+                            bar_index=getattr(self, "_current_bar_index", None),
+                            leg="short_open",
+                        )
+                        self._log(f"  Placed short SELL at L{sell_level_idx+1} @ ${sell_price:,.0f} (re-entry)")
+                else:
+                    self._log(f"  Short leg stopped (cycles_done={self._short_cycles_done}, max_cycles={max_cycles})")
+        elif direction == "buy":
             self.grid_manager.add_buy_position(
                 buy_level_index=level,
                 size=size,
                 buy_price=price
             )
             # Remove filled buy limit order
-            self.grid_manager.remove_pending_order('buy', level)
+            self.grid_manager.remove_pending_order('buy', level, leg=None)
             # Place sell limit order at target sell level
             target_sell_level = level  # buy[i] -> sell[i] (1x spacing)
             if self.grid_manager.sell_levels is not None and target_sell_level < len(self.grid_manager.sell_levels):
@@ -446,6 +568,7 @@ class TaoGridLeanAlgorithm:
                     target_sell_level,
                     target_sell_price,
                     bar_index=getattr(self, "_current_bar_index", None),
+                    leg=None,
                 )
                 self._log(f"  Placed sell limit order at L{target_sell_level+1} @ ${target_sell_price:,.0f}")
             # IMPORTANT (inventory-aware grid):
@@ -453,7 +576,7 @@ class TaoGridLeanAlgorithm:
             # We wait until the corresponding sell is filled, then re-enter.
         elif direction == "sell":
             # Remove filled sell limit order
-            self.grid_manager.remove_pending_order('sell', level)
+            self.grid_manager.remove_pending_order('sell', level, leg=None)
             # Place new buy limit order at the same buy level (re-entry for grid strategy)
             # Find which buy level corresponds to this sell level
             # Since sell[i] is paired with buy[i], we place buy order at buy[i]
@@ -464,6 +587,7 @@ class TaoGridLeanAlgorithm:
                     level,
                     buy_level_price,
                     bar_index=getattr(self, "_current_bar_index", None),
+                    leg=None,
                 )
                 self._log(f"  Placed buy limit order at L{level+1} @ ${buy_level_price:,.0f} (re-entry)")
 

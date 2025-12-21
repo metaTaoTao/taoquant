@@ -1,0 +1,22 @@
+{
+  "total_return": -0.017416061391364493,
+  "annual_return": 0.23471773517028716,
+  "total_pnl": -1741.6061391364492,
+  "max_drawdown": -0.4849656595396917,
+  "sharpe_ratio": 0.7560392262384498,
+  "sortino_ratio": 1.2861647434511048,
+  "calmar_ratio": 0.48398836196581635,
+  "sharpe_to_dd": 1.5589541473019952,
+  "ulcer_index": 12.33253196796744,
+  "sharpe_annualization_days": 365,
+  "total_trades": 154,
+  "winning_trades": 141.0,
+  "losing_trades": 13.0,
+  "win_rate": 0.9155844155844156,
+  "avg_win": 7.697154329454206,
+  "avg_loss": -42.89210120862572,
+  "profit_factor": 1.9463844783164996,
+  "final_equity": 98258.39386086355,
+  "avg_holding_period_hours": 86.91958874458874,
+  "avg_return_per_trade": 0.0007167509669476664
+}

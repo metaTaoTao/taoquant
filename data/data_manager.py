@@ -20,6 +20,8 @@ class DataManager:
 
     EXTERNAL_SOURCE_MAP: Dict[str, Tuple[str, str]] = {
         "okx": ("data.sources.okx_sdk", "OkxSDKDataSource"),
+        # OKX USDT perpetual swap (e.g., BTC-USDT-SWAP). Use this for futures/perp research.
+        "okx_swap": ("data.sources.okx_sdk", "OkxSDKDataSource"),
         "binance": ("data.sources.binance_sdk", "BinanceSDKDataSource"),
         "okx_sdk": ("data.sources.okx_sdk", "OkxSDKDataSource"),
         "binance_sdk": ("data.sources.binance_sdk", "BinanceSDKDataSource"),
@@ -44,9 +46,11 @@ class DataManager:
         """Retrieve OHLCV data for a symbol from the chosen source."""
         source = source.lower()
         cache_path = self._cache_path(source, symbol, timeframe)
+        cached_df_for_merge: pd.DataFrame | None = None
         if use_cache and cache_path.exists():
             cached_df = self._load_cache(cache_path)
             if not cached_df.empty:
+                cached_df_for_merge = cached_df
                 # Check if cache covers the requested time range
                 cache_start = cached_df.index[0]
                 cache_end = cached_df.index[-1]
@@ -90,7 +94,15 @@ class DataManager:
             raise ValueError(f"No data received for {symbol} {timeframe} via {source}.")
 
         if self.cache_config.enabled:
-            self._store_cache(cache_path, data)
+            # IMPORTANT:
+            # Never overwrite an existing cache with a partial slice.
+            # If cache exists but didn't cover the request, merge old+new and persist.
+            if cached_df_for_merge is not None and not cached_df_for_merge.empty:
+                combined = pd.concat([cached_df_for_merge, data]).sort_index()
+                combined = combined[~combined.index.duplicated(keep="last")]
+                self._store_cache(cache_path, combined)
+            else:
+                self._store_cache(cache_path, data)
 
         return data
 
@@ -543,7 +555,11 @@ class DataManager:
         
         # Pass debug=False to OkxSDKDataSource to suppress debug output
         if class_name == "OkxSDKDataSource":
-            instance = cls(debug=False)
+            # Default "okx" => SPOT, "okx_swap" => SWAP (USDT perpetual)
+            if name == "okx_swap":
+                instance = cls(inst_type="SWAP", debug=False)
+            else:
+                instance = cls(inst_type="SPOT", debug=False)
         else:
             instance = cls()
         

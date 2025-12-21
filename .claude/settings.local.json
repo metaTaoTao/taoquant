@@ -15,7 +15,9 @@
       "Bash(tail:*)",
       "Bash(wc:*)",
       "Bash(pkill:*)",
-      "Bash(cat:*)"
+      "Bash(cat:*)",
+      "Bash(tee:*)",
+      "Bash(dir:*)"
     ],
     "deny": [],
     "ask": []

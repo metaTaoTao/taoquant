@@ -47,6 +47,11 @@ class TaoGridLeanConfig:
     # === DGT Parameters (Sprint 2) ===
     enable_mid_shift: bool = False
     mid_shift_threshold: int = 20
+    # Mid shift trigger based on range position distance from mid (0.5).
+    # Example: 0.15 -> shift when range_pos >= 0.65 or <= 0.35 AND we are flat.
+    mid_shift_range_pos_trigger: float = 0.15
+    # Only allow mid shift when holdings are close to flat, to avoid breaking grid pairing ledger.
+    mid_shift_flat_holdings_btc: float = 0.0005
 
     # === Throttling Parameters (Sprint 2) ===
     enable_throttling: bool = True
@@ -93,6 +98,30 @@ class TaoGridLeanConfig:
     deleverage_level2_sell_frac: float = 0.50
     deleverage_cooldown_bars: int = 60  # on 1m bars: 60 = 1 hour
     deleverage_min_notional_usd: float = 2000.0
+
+    # === Optional: Short leg ONLY in BEARISH regime (manual trader decision) ===
+    # Default remains long-only. If enabled and regime == BEARISH_RANGE, the grid will:
+    # - place SELL limits to OPEN short inventory
+    # - place BUY limits to COVER shorts
+    enable_short_in_bearish: bool = False
+    # Safety: do not open shorts if upside breakout risk is high.
+    short_breakout_block_threshold: float = 0.95
+    # Only consider short overlay in high band of the range (range_pos in [0,1]).
+    short_range_pos_trigger: float = 0.75
+    # If in high band, optionally prioritize short_open over BUY fills.
+    short_priority_in_high_band: bool = True
+    # Risk control: if upside breakout risk is high while a short is open, force market cover.
+    enable_short_stop_on_upside_breakout: bool = True
+    # Risk control: maximum holding time for a short overlay (in bars).
+    # Default 180 on 1m bars ~= 3 hours.
+    short_max_hold_bars: int = 180
+    # Safety: do not allow simultaneous long & short in this simplified model.
+    short_flat_holdings_btc: float = 0.0005
+    # Safety: do not stack shorts; 1 means "one short position at a time".
+    short_max_concurrent_positions: int = 1
+    # Manual-trader style: limit how many short cycles (open->cover) can occur per run.
+    # Default 1: "only the first trade is short", then stop shorting.
+    short_max_cycles: int = 1
     # Factor filter (Sharpe-oriented): MR strength + trend state
     enable_mr_trend_factor: bool = True
     mr_z_lookback: int = 240  # bars
@@ -282,6 +311,16 @@ class TaoGridLeanConfig:
             raise ValueError("deleverage_cooldown_bars must be >= 0")
         if self.deleverage_min_notional_usd < 0:
             raise ValueError("deleverage_min_notional_usd must be >= 0")
+        if not (0.0 <= self.short_breakout_block_threshold <= 1.0):
+            raise ValueError("short_breakout_block_threshold must be in [0, 1]")
+        if not (0.0 <= self.short_range_pos_trigger <= 1.0):
+            raise ValueError("short_range_pos_trigger must be in [0, 1]")
+        if self.short_flat_holdings_btc < 0:
+            raise ValueError("short_flat_holdings_btc must be >= 0")
+        if self.short_max_concurrent_positions < 1:
+            raise ValueError("short_max_concurrent_positions must be >= 1")
+        if self.short_max_cycles < 1:
+            raise ValueError("short_max_cycles must be >= 1")
         # Leverage validation:
         # For perp products, higher leverage (e.g., 20-50x) is common, but it can easily
         # produce unrealistic backtest assumptions if liquidation / margin is not modeled.
@@ -362,6 +401,14 @@ class TaoGridLeanConfig:
             raise ValueError("vol_trigger_score must be in [0, 1]")
         if self.vol_sell_mult_high < 1.0:
             raise ValueError("vol_sell_mult_high must be >= 1.0")
+
+        # Mid shift validations
+        if self.mid_shift_threshold < 0:
+            raise ValueError("mid_shift_threshold must be >= 0")
+        if not (0.0 <= self.mid_shift_range_pos_trigger <= 0.5):
+            raise ValueError("mid_shift_range_pos_trigger must be in [0, 0.5]")
+        if self.mid_shift_flat_holdings_btc < 0:
+            raise ValueError("mid_shift_flat_holdings_btc must be >= 0")
 
         # Market Maker Risk Zone validations
         if not (0.0 <= self.mm_risk_level1_buy_mult <= 1.0):
