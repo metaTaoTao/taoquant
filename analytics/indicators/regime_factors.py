@@ -74,7 +74,9 @@ def calculate_ema_slope(ema: pd.Series, lookback: int) -> pd.Series:
     """
     if lookback <= 0:
         raise ValueError("lookback must be > 0")
-    return ema.pct_change(periods=lookback)
+    # Pandas FutureWarning: default fill_method='pad' will be removed.
+    # For factor purity, we do NOT forward-fill missing values implicitly.
+    return ema.pct_change(periods=lookback, fill_method=None)
 
 
 def trend_score_from_slope(slope: pd.Series, slope_ref: float = 0.001) -> pd.Series:

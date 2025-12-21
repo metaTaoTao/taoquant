@@ -532,7 +532,7 @@ class BitgetLiveRunner:
         leg_tag = leg if leg is not None else "long"
         return f"{self._client_oid_prefix}{direction}_{int(level_index)}_{leg_tag}"
 
-    def _sync_exchange_orders(self, current_price: Optional[float]) -> None:
+    def _sync_exchange_orders(self, current_price: Optional[float], current_time: Optional[datetime] = None) -> None:
         """
         Sync algorithm.pending_limit_orders -> exchange open orders.
 
@@ -542,12 +542,12 @@ class BitgetLiveRunner:
         - Orders are only eligible if they won't immediately cross the market:
           BUY only if level_price <= current_price; SELL only if level_price >= current_price.
         """
-        if self.dry_run:
-            return
-
-        # If grid disabled, cancel all bot orders.
+        # If grid disabled, cancel all bot orders (real) or just log (dry-run).
         if not bool(self.algorithm.grid_manager.grid_enabled):
-            self.execution_engine.cancel_all_orders(self.symbol, client_oid_prefix=self._client_oid_prefix)
+            if not self.dry_run:
+                self.execution_engine.cancel_all_orders(self.symbol, client_oid_prefix=self._client_oid_prefix)
+            else:
+                self.logger.log_warning("[DRY_RUN] grid disabled -> would cancel all bot orders")
             return
 
         cp = float(current_price) if current_price is not None else None
@@ -591,6 +591,84 @@ class BitgetLiveRunner:
 
             desired[self._order_key(direction, level_index, leg)] = o
 
+        # Compute target quantities for preview and/or placing on exchange
+        fs = self._last_factor_state or {}
+        mr_z = fs.get("mr_z")
+        trend_score = fs.get("trend_score")
+        br_down = fs.get("breakout_risk_down")
+        br_up = fs.get("breakout_risk_up")
+        rp = fs.get("range_pos")
+        fr = fs.get("funding_rate")
+        mtf = fs.get("minutes_to_funding")
+        vs = fs.get("vol_score")
+
+        ps = self._get_portfolio_state(
+            current_price=float(cp)
+            if cp is not None
+            else (float(list(desired.values())[0]["price"]) if desired else 1.0)
+        )
+
+        planned: list[dict] = []
+        for _, o in desired.items():
+            direction = str(o.get("direction"))
+            level_index = int(o.get("level_index"))
+            price = float(o.get("price"))
+            leg = o.get("leg")
+            size, throttle = self.algorithm.grid_manager.calculate_order_size(
+                direction=direction,
+                level_index=level_index,
+                level_price=price,
+                equity=float(ps.get("equity", self.config.initial_cash)),
+                daily_pnl=float(ps.get("daily_pnl", 0.0)),
+                risk_budget=float(self.algorithm.risk_budget),
+                holdings_btc=float(ps.get("holdings", 0.0)),
+                order_leg=leg,
+                current_price=float(cp) if cp is not None else price,
+                mr_z=mr_z,
+                trend_score=trend_score,
+                breakout_risk_down=br_down,
+                breakout_risk_up=br_up,
+                range_pos=rp,
+                funding_rate=fr,
+                minutes_to_funding=mtf,
+                vol_score=vs,
+            )
+            qty = float(size)
+            if qty <= 0:
+                continue
+            planned.append(
+                {
+                    "direction": direction,
+                    "level_index": level_index,
+                    "price": price,
+                    "quantity": qty,
+                    "leg": leg,
+                    "reason": getattr(throttle, "reason", None),
+                }
+            )
+
+        # Dry-run preview: log a compact order summary periodically
+        if self.dry_run:
+            if int(getattr(self, "_bar_index", 0) or 0) % 5 == 0:
+                buys = sorted([o for o in planned if o["direction"] == "buy"], key=lambda x: x["price"], reverse=True)
+                sells = sorted([o for o in planned if o["direction"] == "sell"], key=lambda x: x["price"])
+                ts = current_time or datetime.now(timezone.utc)
+                self.logger.log_info(
+                    f"[DRY_RUN_ORDERS] {ts} price={cp if cp is not None else 'NA'} "
+                    f"planned_buy={len(buys)} planned_sell={len(sells)} "
+                    f"(active_buy_levels={self.active_buy_levels}, in_cooldown={self._in_cooldown(ts)})"
+                )
+                for o in buys[:5]:
+                    self.logger.log_info(
+                        f"  BUY  L{o['level_index']+1} @{o['price']:.2f} qty={o['quantity']:.6f}"
+                    )
+                for o in sells[:5]:
+                    self.logger.log_info(
+                        f"  SELL L{o['level_index']+1} @{o['price']:.2f} qty={o['quantity']:.6f}"
+                    )
+            return
+
+        # === Real exchange sync below (non-dry-run) ===
         open_orders = self.execution_engine.get_open_orders(self.symbol)
         open_by_client: Dict[str, dict] = {}
         for oo in open_orders:
@@ -614,57 +692,14 @@ class BitgetLiveRunner:
                 if oid:
                     self.execution_engine.cancel_order(self.symbol, oid)
 
-        # Place / replace desired orders
-        # Recompute size using latest factor snapshot + equity snapshot
-        ps = self._get_portfolio_state(current_price=float(cp) if cp is not None else (float(list(desired.values())[0]["price"]) if desired else 1.0))
-        for k, o in desired.items():
+        for o in planned:
             direction = str(o.get("direction"))
             level_index = int(o.get("level_index"))
             price = float(o.get("price"))
             leg = o.get("leg")
+            qty = float(o.get("quantity"))
             client_oid = self._make_client_oid(direction, level_index, leg)
 
-            # Use latest factors (computed in run loop) to match backtest sizing semantics.
-            fs = self._last_factor_state or {}
-            mr_z = fs.get("mr_z")
-            trend_score = fs.get("trend_score")
-            br_down = fs.get("breakout_risk_down")
-            br_up = fs.get("breakout_risk_up")
-            rp = fs.get("range_pos")
-            fr = fs.get("funding_rate")
-            mtf = fs.get("minutes_to_funding")
-            vs = fs.get("vol_score")
-
-            size, throttle = self.algorithm.grid_manager.calculate_order_size(
-                direction=direction,
-                level_index=level_index,
-                level_price=price,
-                equity=float(ps.get("equity", self.config.initial_cash)),
-                daily_pnl=float(ps.get("daily_pnl", 0.0)),
-                risk_budget=float(self.algorithm.risk_budget),
-                holdings_btc=float(ps.get("holdings", 0.0)),
-                order_leg=leg,
-                current_price=float(cp) if cp is not None else price,
-                mr_z=mr_z,
-                trend_score=trend_score,
-                breakout_risk_down=br_down,
-                breakout_risk_up=br_up,
-                range_pos=rp,
-                funding_rate=fr,
-                minutes_to_funding=mtf,
-                vol_score=vs,
-            )
-
-            qty = float(size)
-            if qty <= 0.0:
-                # If blocked, ensure any existing order is cancelled
-                if client_oid in open_by_client:
-                    oid = str(open_by_client[client_oid].get("order_id") or "")
-                    if oid:
-                        self.execution_engine.cancel_order(self.symbol, oid)
-                continue
-
-            # If already open, replace only when quantity differs materially
             if client_oid in open_by_client:
                 oo = open_by_client[client_oid]
                 open_qty = float(oo.get("quantity", 0.0) or 0.0)
@@ -692,7 +727,7 @@ class BitgetLiveRunner:
                     "leg": leg,
                     "_processed_filled_qty": 0.0,
                     "client_order_id": client_oid,
-                    "reason": getattr(throttle, "reason", None),
+                    "reason": o.get("reason"),
                 }
 
     def run(self):
@@ -893,8 +928,11 @@ class BitgetLiveRunner:
                             reason="DRY RUN - Order not placed",
                         )
 
-                    # Sync grid orders to exchange (place missing, cancel extra, re-size)
-                    self._sync_exchange_orders(current_price=float(latest_bar["close"]))
+                    # Sync grid orders to exchange (place/cancel/re-size) or preview (dry-run)
+                    self._sync_exchange_orders(
+                        current_price=float(latest_bar["close"]),
+                        current_time=bar_timestamp,
+                    )
 
                     # Wait for next minute
                     # Calculate sleep time to align with minute boundary
