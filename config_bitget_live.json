@@ -1,7 +1,7 @@
 {
   "strategy": {
     "name": "TaoGrid Live",
-    "support": 80000.0,
+    "support": 84000.0,
     "resistance": 94000.0,
     "regime": "NEUTRAL_RANGE",
     "grid_layers_buy": 35,
@@ -19,5 +19,15 @@
     "enable_throttling": true,
     "enable_mm_risk_zone": true,
     "enable_console_log": true
+  },
+  "execution": {
+    "max_fills_per_bar": 1,
+    "active_buy_levels": 6,
+    "cooldown_minutes": 2,
+    "cooldown_active_buy_levels": 2,
+    "abnormal_buy_fills_trigger": 2,
+    "abnormal_total_fills_trigger": 3,
+    "abnormal_buy_notional_frac_equity": 0.03,
+    "abnormal_range_mult_spacing": 4
   }
 }

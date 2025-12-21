@@ -43,7 +43,7 @@ from algorithms.taogrid.bitget_live_runner import BitgetLiveRunner
 from algorithms.taogrid.config import TaoGridLeanConfig
 
 
-def load_config_from_file(config_file: str) -> TaoGridLeanConfig:
+def load_config_from_file(config_file: str) -> tuple[TaoGridLeanConfig, dict]:
     """
     Load configuration from JSON file.
 
@@ -54,8 +54,8 @@ def load_config_from_file(config_file: str) -> TaoGridLeanConfig:
 
     Returns
     -------
-    TaoGridLeanConfig
-        Configuration object
+    (TaoGridLeanConfig, dict)
+        Strategy configuration + execution-model configuration
     """
     config_path = Path(config_file)
     if not config_path.exists():
@@ -66,7 +66,7 @@ def load_config_from_file(config_file: str) -> TaoGridLeanConfig:
 
     # Extract strategy config
     strategy_config = config_data.get("strategy", {})
-    execution_config = config_data.get("execution", {})
+    execution_config = config_data.get("execution", {}) or {}
 
     # Create config object with all parameters from JSON
     # Required parameters
@@ -106,7 +106,18 @@ def load_config_from_file(config_file: str) -> TaoGridLeanConfig:
     if "enable_console_log" in strategy_config:
         config.enable_console_log = bool(strategy_config["enable_console_log"])
 
-    return config
+    # Execution-model knobs (match SimpleLeanRunner)
+    exec_cfg = {
+        "max_fills_per_bar": int(execution_config.get("max_fills_per_bar", 1)),
+        "active_buy_levels": execution_config.get("active_buy_levels", None),
+        "cooldown_minutes": int(execution_config.get("cooldown_minutes", 0)),
+        "abnormal_buy_fills_trigger": int(execution_config.get("abnormal_buy_fills_trigger", 0)),
+        "abnormal_total_fills_trigger": int(execution_config.get("abnormal_total_fills_trigger", 0)),
+        "abnormal_buy_notional_frac_equity": float(execution_config.get("abnormal_buy_notional_frac_equity", 0.0)),
+        "abnormal_range_mult_spacing": float(execution_config.get("abnormal_range_mult_spacing", 0.0)),
+        "cooldown_active_buy_levels": int(execution_config.get("cooldown_active_buy_levels", 0)),
+    }
+    return config, exec_cfg
 
 
 def main():
@@ -205,7 +216,7 @@ Examples:
     try:
         if args.config_file:
             print(f"Loading configuration from {args.config_file}...")
-            config = load_config_from_file(args.config_file)
+            config, execution_model = load_config_from_file(args.config_file)
         else:
             print("Using default configuration...")
             config = TaoGridLeanConfig(
@@ -214,6 +225,7 @@ Examples:
                 resistance=126000.0,
                 regime="NEUTRAL_RANGE",
             )
+            execution_model = {}
     except Exception as e:
         print(f"Error loading configuration: {e}")
         sys.exit(1)
@@ -238,6 +250,7 @@ Examples:
             subaccount_uid=args.subaccount_uid,
             dry_run=args.dry_run,
             log_dir=args.log_dir,
+            execution_model=execution_model,
         )
 
         # Run

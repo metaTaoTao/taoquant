@@ -148,7 +148,13 @@ class TaoGridLeanAlgorithm:
         self._log("Initialization complete!")
         self._log(f"{'='*80}\n")
 
-    def on_data(self, current_time: datetime, bar_data: dict, portfolio_state: dict):
+    def on_data(
+        self,
+        current_time: datetime,
+        bar_data: dict,
+        portfolio_state: dict,
+        live_mode: bool = False,
+    ):
         """
         Called every bar to process market data.
 
@@ -290,6 +296,14 @@ class TaoGridLeanAlgorithm:
                                 "reason": f"Forced deleverage (unrealized_pnl_pct={unrealized_pnl_pct:.2%})",
                                 "timestamp": current_time,
                             }
+
+        # Live trading mode:
+        # - Grid limit orders should be resting on the exchange (not simulated via OHLC touch).
+        # - So we DO NOT run check_limit_order_triggers here.
+        # - We still compute risk state and may emit special market orders (deleverage/short stop).
+        if bool(live_mode):
+            self._prev_price = current_price
+            return None
 
         # Check if any pending limit order is triggered
         # Use bar index to avoid duplicate triggers (we'll pass it from runner)

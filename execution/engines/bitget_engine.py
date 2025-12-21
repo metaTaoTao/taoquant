@@ -65,6 +65,76 @@ class BitgetExecutionEngine:
         # Track pending orders
         self.pending_orders: Dict[str, Dict[str, Any]] = {}
 
+    def place_order(
+        self,
+        symbol: str,
+        side: str,
+        quantity: float,
+        price: Optional[float] = None,
+        order_type: str = "limit",
+        client_order_id: Optional[str] = None,
+        params: Optional[Dict[str, Any]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Place an order (limit/market) with optional client_order_id for idempotency.
+
+        Notes
+        -----
+        - For Bitget (via CCXT), client order id is usually passed as params["clientOid"].
+        - For market orders, price is ignored.
+        """
+        try:
+            ccxt_symbol = self._convert_symbol(symbol)
+            ccxt_side = "buy" if side.lower() == "buy" else "sell"
+            ccxt_type = str(order_type or "limit").lower()
+
+            extra: Dict[str, Any] = {}
+            if params:
+                extra.update(params)
+            if client_order_id:
+                extra.setdefault("clientOid", str(client_order_id))
+
+            amount = float(self.exchange.amount_to_precision(ccxt_symbol, quantity))
+
+            if ccxt_type == "market":
+                if self.debug:
+                    print(
+                        f"[Bitget CCXT Engine] create_order(symbol={ccxt_symbol}, type=market, side={ccxt_side}, amount={amount}, clientOid={client_order_id})"
+                    )
+                order = self.exchange.create_order(ccxt_symbol, "market", ccxt_side, amount, None, extra or None)
+            else:
+                if price is None:
+                    raise ValueError("price is required for limit orders")
+                px = float(self.exchange.price_to_precision(ccxt_symbol, float(price)))
+                if self.debug:
+                    print(
+                        f"[Bitget CCXT Engine] create_order(symbol={ccxt_symbol}, type=limit, side={ccxt_side}, amount={amount}, price={px}, clientOid={client_order_id})"
+                    )
+                order = self.exchange.create_order(ccxt_symbol, "limit", ccxt_side, amount, px, extra or None)
+
+            order_id = str(order.get("id", "")) if isinstance(order, dict) else ""
+            if not order_id:
+                return None
+
+            info = {
+                "order_id": order_id,
+                "client_order_id": (order.get("clientOrderId") if isinstance(order, dict) else None) or client_order_id,
+                "symbol": symbol,
+                "side": side.lower(),
+                "price": float(price) if price is not None else None,
+                "quantity": float(quantity),
+                "status": str(order.get("status", "open")) if isinstance(order, dict) else "open",
+                "timestamp": datetime.now(),
+            }
+            self.pending_orders[order_id] = info
+            return info
+        except Exception as e:
+            if self.debug:
+                print(f"[Bitget CCXT Engine] Error placing order: {e}")
+                import traceback
+                traceback.print_exc()
+            return None
+
     def place_limit_order(
         self,
         symbol: str,
@@ -94,41 +164,13 @@ class BitgetExecutionEngine:
         dict or None
             Order response with order_id, status, etc.
         """
-        try:
-            ccxt_symbol = self._convert_symbol(symbol)
-            ccxt_side = "buy" if side.lower() == "buy" else "sell"
-            ccxt_type = "limit" if order_type == "limit" else order_type
-
-            # CCXT: amount/price precision
-            amount = float(self.exchange.amount_to_precision(ccxt_symbol, quantity))
-            px = float(self.exchange.price_to_precision(ccxt_symbol, price))
-
-            if self.debug:
-                print(f"[Bitget CCXT Engine] create_order(symbol={ccxt_symbol}, side={ccxt_side}, amount={amount}, price={px})")
-
-            order = self.exchange.create_order(ccxt_symbol, ccxt_type, ccxt_side, amount, px)
-            order_id = str(order.get("id", ""))
-            if not order_id:
-                return None
-
-            order_info = {
-                "order_id": order_id,
-                "symbol": symbol,
-                "side": side,
-                "price": price,
-                "quantity": quantity,
-                "status": str(order.get("status", "open")),
-                "timestamp": datetime.now(),
-            }
-            self.pending_orders[order_id] = order_info
-            return order_info
-
-        except Exception as e:
-            if self.debug:
-                print(f"[Bitget CCXT Engine] Error placing order: {e}")
-                import traceback
-                traceback.print_exc()
-            return None
+        return self.place_order(
+            symbol=symbol,
+            side=side,
+            quantity=quantity,
+            price=price,
+            order_type=order_type,
+        )
 
     def cancel_order(self, symbol: str, order_id: str) -> bool:
         """
@@ -186,11 +228,14 @@ class BitgetExecutionEngine:
                 orders.append(
                     {
                         "order_id": str(o.get("id", "")),
+                        "client_order_id": str(o.get("clientOrderId", "") or o.get("clientOid", "") or ""),
                         "symbol": str(o.get("symbol", "")),
                         "side": str(o.get("side", "")),
                         "price": float(o.get("price") or 0.0),
                         "quantity": float(o.get("amount") or 0.0),
                         "filled_quantity": float(o.get("filled") or 0.0),
+                        "remaining_quantity": float(o.get("remaining") or 0.0),
+                        "average_price": float(o.get("average") or 0.0),
                         "status": str(o.get("status", "open")),
                     }
                 )
@@ -225,15 +270,39 @@ class BitgetExecutionEngine:
                 "symbol": str(o.get("symbol", "")),
                 "side": str(o.get("side", "")),
                 "price": float(o.get("price") or 0.0),
+                "average_price": float(o.get("average") or 0.0),
+                "cost": float(o.get("cost") or 0.0),
                 "quantity": float(o.get("amount") or 0.0),
                 "filled_quantity": float(o.get("filled") or 0.0),
+                "remaining_quantity": float(o.get("remaining") or 0.0),
                 "status": str(o.get("status", "unknown")),
+                "client_order_id": str(o.get("clientOrderId", "") or o.get("clientOid", "") or ""),
             }
 
         except Exception as e:
             if self.debug:
                 print(f"[Bitget CCXT Engine] Error getting order status: {e}")
             return None
+
+    def cancel_all_orders(self, symbol: str, client_oid_prefix: Optional[str] = None) -> int:
+        """
+        Cancel all open orders for a symbol.
+
+        If client_oid_prefix is provided, only cancel orders whose client_order_id starts with the prefix.
+        Returns number of cancelled orders (best-effort).
+        """
+        cancelled = 0
+        open_orders = self.get_open_orders(symbol)
+        for o in open_orders:
+            coid = str(o.get("client_order_id") or "")
+            if client_oid_prefix and not coid.startswith(client_oid_prefix):
+                continue
+            oid = str(o.get("order_id") or "")
+            if not oid:
+                continue
+            if self.cancel_order(symbol, oid):
+                cancelled += 1
+        return cancelled
 
     def get_account_balance(self) -> Dict[str, Any]:
         """

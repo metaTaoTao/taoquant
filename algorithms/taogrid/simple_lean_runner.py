@@ -493,13 +493,6 @@ class SimpleLeanRunner:
                     # Update grid state and place new limit orders
                     self.algorithm.on_order_filled(order)
 
-                    # Keep grid_manager state consistent for trade recording
-                    if order['direction'] == 'sell' and order.get("leg") is None:
-                        _ = self.algorithm.grid_manager.match_sell_order(
-                            sell_level_index=order['level'],
-                            sell_size=order['quantity']
-                        )
-
                     # Refresh portfolio_state for possible next fill in the same bar
                     price = float(row["close"])
                     self.holdings = float(self.long_holdings) - float(self.short_holdings)
