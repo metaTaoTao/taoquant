@@ -56,6 +56,43 @@ class TaoGridLeanConfig:
     # Example: leverage=5x and threshold_pct=0.9 -> block new BUY when notional/equity >= 4.5.
     inventory_capacity_threshold_pct: float = 0.9
     inventory_skew_k: float = 1.0  # inventory-aware sizing strength (0 = off)
+
+    # === P0 Risk Fix: Inventory denominator + regime scaling ===
+    # Problem: BULLISH_RANGE (70/30) accumulates inventory much faster than NEUTRAL (50/50),
+    # but the inventory gate uses a static threshold. This creates much larger drawdowns
+    # under the same price move.
+    #
+    # Solution:
+    # - Use an equity floor for inventory denominator (avoid denominator shrinking after drawdown).
+    # - Scale inventory capacity threshold by buy allocation (more buy-heavy => stricter cap).
+    inventory_use_equity_floor: bool = True
+    inventory_equity_floor_mode: Literal["initial_cash"] = "initial_cash"
+    enable_regime_inventory_scaling: bool = True
+    inventory_regime_ref_buy_ratio: float = 0.5  # neutral reference
+    # Strength of regime scaling (1.0 = current behavior; >1.0 makes buy-heavy regimes stricter)
+    inventory_regime_gamma: float = 1.0
+    inventory_capacity_threshold_min_pct: float = 0.25
+    inventory_capacity_threshold_max_pct: float = 1.0
+
+    # === P0 Risk Fix: Cost-basis risk zone ===
+    # Critical blind spot: only checking "price vs support" misses "price vs avg_cost".
+    # When price is below avg_cost, the same inventory produces much larger equity drawdowns.
+    # If triggered, we stop (or heavily reduce) new BUYs until price recovers.
+    enable_cost_basis_risk_zone: bool = True
+    cost_risk_trigger_pct: float = 0.03  # trigger when price <= avg_cost * (1 - trigger)
+    cost_risk_buy_mult: float = 0.0  # 0.0 = stop adding inventory in cost-risk zone
+
+    # === P1 Risk Fix: Forced deleveraging on large unrealized losses ===
+    # When inventory is already accumulated, "stop buying" is not enough to cap drawdown.
+    # This optional protection will issue a market SELL to reduce holdings when unrealized loss
+    # exceeds thresholds. Use with caution in live trading (it realizes losses).
+    enable_forced_deleverage: bool = False
+    deleverage_level1_unrealized_loss_pct: float = 0.15
+    deleverage_level2_unrealized_loss_pct: float = 0.25
+    deleverage_level1_sell_frac: float = 0.25
+    deleverage_level2_sell_frac: float = 0.50
+    deleverage_cooldown_bars: int = 60  # on 1m bars: 60 = 1 hour
+    deleverage_min_notional_usd: float = 2000.0
     # Factor filter (Sharpe-oriented): MR strength + trend state
     enable_mr_trend_factor: bool = True
     mr_z_lookback: int = 240  # bars
@@ -217,6 +254,34 @@ class TaoGridLeanConfig:
             raise ValueError("inventory_capacity_threshold_pct must be in (0, 1.0]")
         if self.inventory_skew_k < 0:
             raise ValueError("inventory_skew_k must be >= 0")
+        if not (0.0 < self.inventory_capacity_threshold_min_pct <= 1.0):
+            raise ValueError("inventory_capacity_threshold_min_pct must be in (0, 1.0]")
+        if not (0.0 < self.inventory_capacity_threshold_max_pct <= 1.0):
+            raise ValueError("inventory_capacity_threshold_max_pct must be in (0, 1.0]")
+        if self.inventory_capacity_threshold_min_pct > self.inventory_capacity_threshold_max_pct:
+            raise ValueError("inventory_capacity_threshold_min_pct must be <= inventory_capacity_threshold_max_pct")
+        if self.inventory_regime_ref_buy_ratio <= 0 or self.inventory_regime_ref_buy_ratio > 1.0:
+            raise ValueError("inventory_regime_ref_buy_ratio must be in (0, 1]")
+        if self.inventory_regime_gamma <= 0:
+            raise ValueError("inventory_regime_gamma must be > 0")
+        if not (0.0 <= self.cost_risk_trigger_pct <= 0.30):
+            raise ValueError("cost_risk_trigger_pct must be in [0, 0.30]")
+        if not (0.0 <= self.cost_risk_buy_mult <= 1.0):
+            raise ValueError("cost_risk_buy_mult must be in [0, 1]")
+        if self.deleverage_level1_unrealized_loss_pct <= 0 or self.deleverage_level1_unrealized_loss_pct >= 1:
+            raise ValueError("deleverage_level1_unrealized_loss_pct must be in (0, 1)")
+        if self.deleverage_level2_unrealized_loss_pct <= 0 or self.deleverage_level2_unrealized_loss_pct >= 1:
+            raise ValueError("deleverage_level2_unrealized_loss_pct must be in (0, 1)")
+        if self.deleverage_level1_unrealized_loss_pct >= self.deleverage_level2_unrealized_loss_pct:
+            raise ValueError("deleverage_level1_unrealized_loss_pct must be < deleverage_level2_unrealized_loss_pct")
+        if not (0.0 < self.deleverage_level1_sell_frac <= 1.0):
+            raise ValueError("deleverage_level1_sell_frac must be in (0, 1]")
+        if not (0.0 < self.deleverage_level2_sell_frac <= 1.0):
+            raise ValueError("deleverage_level2_sell_frac must be in (0, 1]")
+        if self.deleverage_cooldown_bars < 0:
+            raise ValueError("deleverage_cooldown_bars must be >= 0")
+        if self.deleverage_min_notional_usd < 0:
+            raise ValueError("deleverage_min_notional_usd must be >= 0")
         # Leverage validation:
         # For perp products, higher leverage (e.g., 20-50x) is common, but it can easily
         # produce unrealistic backtest assumptions if liquidation / margin is not modeled.

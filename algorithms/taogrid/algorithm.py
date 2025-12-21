@@ -78,6 +78,7 @@ class TaoGridLeanAlgorithm:
 
         # Bar index tracking (for logging, set by runner)
         self._current_bar_index = 0
+        self._last_deleverage_bar_index: int = -10**9
 
         self._log(f"TaoGrid Lean Algorithm initialized: {self.config.name}")
 
@@ -231,6 +232,51 @@ class TaoGridLeanAlgorithm:
             self._prev_price = current_price
             return None
 
+        # P1: Forced deleveraging (market sell) on large unrealized losses.
+        # This is a safety valve for buy-heavy regimes where inventory can accumulate faster
+        # than the grid can rotate out during drawdowns.
+        if getattr(self.config, "enable_forced_deleverage", False):
+            holdings_btc = float(portfolio_state.get("holdings", 0.0))
+            equity = float(portfolio_state.get("equity", self.config.initial_cash))
+            unrealized_pnl = float(portfolio_state.get("unrealized_pnl", 0.0))
+            if holdings_btc > 0 and equity > 0 and current_price is not None and float(current_price) > 0:
+                unrealized_pnl_pct = unrealized_pnl / equity
+                lvl1 = float(getattr(self.config, "deleverage_level1_unrealized_loss_pct", 0.15))
+                lvl2 = float(getattr(self.config, "deleverage_level2_unrealized_loss_pct", 0.25))
+                sell_frac = 0.0
+                if unrealized_pnl_pct <= -lvl2:
+                    sell_frac = float(getattr(self.config, "deleverage_level2_sell_frac", 0.50))
+                elif unrealized_pnl_pct <= -lvl1:
+                    sell_frac = float(getattr(self.config, "deleverage_level1_sell_frac", 0.25))
+
+                # Optional: also trigger on cost-basis drawdown (same threshold as cost risk zone)
+                if sell_frac == 0.0 and getattr(self.config, "enable_cost_basis_risk_zone", False):
+                    avg_cost = self.grid_manager._get_avg_cost_from_positions()
+                    if avg_cost is not None and avg_cost > 0:
+                        cost_trigger = float(getattr(self.config, "cost_risk_trigger_pct", 0.03))
+                        if float(current_price) <= float(avg_cost) * (1.0 - cost_trigger):
+                            sell_frac = float(getattr(self.config, "deleverage_level1_sell_frac", 0.25))
+
+                # Cooldown to avoid repeated selling every bar
+                bar_idx = getattr(self, "_current_bar_index", 0) or 0
+                cooldown = int(getattr(self.config, "deleverage_cooldown_bars", 60))
+                if sell_frac > 0 and isinstance(bar_idx, int) and (bar_idx - self._last_deleverage_bar_index) >= cooldown:
+                    notional = holdings_btc * float(current_price)
+                    min_notional = float(getattr(self.config, "deleverage_min_notional_usd", 2000.0))
+                    if notional >= min_notional:
+                        qty = max(0.0, min(holdings_btc, holdings_btc * sell_frac))
+                        if qty > 0:
+                            self._last_deleverage_bar_index = bar_idx
+                            return {
+                                "symbol": self.symbol,
+                                "direction": "sell",
+                                "quantity": qty,
+                                "price": None,   # market execution in runner
+                                "level": -1,     # sentinel: not a grid level
+                                "reason": f"Forced deleverage (unrealized_pnl_pct={unrealized_pnl_pct:.2%})",
+                                "timestamp": current_time,
+                            }
+
         # Check if any pending limit order is triggered
         # Use bar index to avoid duplicate triggers (we'll pass it from runner)
         triggered_order = self.grid_manager.check_limit_order_triggers(
@@ -369,6 +415,15 @@ class TaoGridLeanAlgorithm:
         size = order["quantity"]
         level = order["level"]
         price = order["price"]
+
+        # Forced deleverage sells are not tied to a grid level.
+        # Do not modify pending grid orders or re-entry logic for these.
+        if direction == "sell" and (level is None or int(level) < 0 or price is None):
+            self.grid_manager.update_inventory(direction, size, int(level) if level is not None else -1)
+            self.filled_orders.append(order)
+            self.grid_manager.reset_triggered_orders()
+            self._log(f"  Forced deleverage filled - SELL {size:.4f} BTC @ market (reason: {order.get('reason', '')})")
+            return
 
         # Update inventory
         self.grid_manager.update_inventory(direction, size, level)

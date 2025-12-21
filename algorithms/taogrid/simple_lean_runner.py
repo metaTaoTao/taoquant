@@ -849,6 +849,36 @@ class SimpleLeanRunner:
         daily_equity = equity_ts["equity"].resample("1D").last().dropna()
         daily_returns = daily_equity.pct_change().dropna()
 
+        # Initialize ratios to avoid unbound locals
+        sharpe = 0.0
+        sortino = 0.0
+
+        # Annualized return (CAGR-style, based on backtest span)
+        annual_return = 0.0
+        if len(daily_equity) >= 2:
+            span_days = (daily_equity.index[-1] - daily_equity.index[0]).days
+            if span_days > 0 and daily_equity.iloc[0] > 0:
+                years = span_days / float(annual_days)
+                if years > 0:
+                    annual_return = float((daily_equity.iloc[-1] / daily_equity.iloc[0]) ** (1.0 / years) - 1.0)
+
+        # Ulcer Index (drawdown depth + duration): sqrt(mean(drawdown_pct^2))
+        # Use daily equity for stability.
+        ulcer_index = 0.0
+        if len(daily_equity) >= 2:
+            dd = (daily_equity.cummax() - daily_equity) / daily_equity.cummax()  # 0..1
+            dd_pct = (dd * 100.0).astype(float)
+            ulcer_index = float(np.sqrt(np.mean(np.square(dd_pct)))) if len(dd_pct) > 0 else 0.0
+
+        # Calmar ratio = annual_return / |max_drawdown|
+        calmar = 0.0
+        if max_drawdown < 0:
+            calmar = float(annual_return / abs(float(max_drawdown))) if abs(float(max_drawdown)) > 1e-12 else 0.0
+
+        # Sharpe / |MaxDD| (simple risk-adjusted stability ratio)
+        # NOTE: compute AFTER sharpe is computed below (sharpe is initialized to 0.0 above).
+        sharpe_to_dd = 0.0
+
         if daily_returns.std() > 0:
             sharpe = float(daily_returns.mean() / daily_returns.std() * np.sqrt(annual_days))
         else:
@@ -860,6 +890,9 @@ class SimpleLeanRunner:
             sortino = float(daily_returns.mean() / downside_std * np.sqrt(annual_days))
         else:
             sortino = 0.0
+
+        if max_drawdown < 0:
+            sharpe_to_dd = float(sharpe / abs(float(max_drawdown))) if abs(float(max_drawdown)) > 1e-12 else 0.0
 
         # Trade statistics
         if not trades_df.empty:
@@ -894,10 +927,14 @@ class SimpleLeanRunner:
 
         return {
             'total_return': total_return,
+            'annual_return': annual_return,
             'total_pnl': final_equity - initial_equity,
             'max_drawdown': max_drawdown,
             'sharpe_ratio': sharpe,
             'sortino_ratio': sortino,
+            'calmar_ratio': calmar,
+            'sharpe_to_dd': sharpe_to_dd,
+            'ulcer_index': ulcer_index,
             'sharpe_annualization_days': annual_days,
             'total_trades': total_trades,
             'winning_trades': winning_trades,
@@ -972,11 +1009,19 @@ class SimpleLeanRunner:
         print()
         print("Performance:")
         print(f"  Total Return:    {metrics['total_return']:.2%}")
+        if 'annual_return' in metrics:
+            print(f"  Annual Return:   {metrics['annual_return']:.2%}")
         print(f"  Total PnL:       ${metrics['total_pnl']:,.2f}")
         print(f"  Final Equity:    ${metrics['final_equity']:,.2f}")
         print(f"  Max Drawdown:    {metrics['max_drawdown']:.2%}")
         print(f"  Sharpe Ratio:    {metrics['sharpe_ratio']:.2f}")
         print(f"  Sortino Ratio:   {metrics['sortino_ratio']:.2f}")
+        if 'calmar_ratio' in metrics:
+            print(f"  Calmar Ratio:    {metrics['calmar_ratio']:.2f}")
+        if 'sharpe_to_dd' in metrics:
+            print(f"  Sharpe/|MaxDD|:  {metrics['sharpe_to_dd']:.2f}")
+        if 'ulcer_index' in metrics:
+            print(f"  Ulcer Index:     {metrics['ulcer_index']:.2f}")
         print()
         print("Trading:")
         print(f"  Total Trades:    {metrics['total_trades']}")
@@ -1007,10 +1052,10 @@ def main():
         description="6-month backtest with full risk controls (5x leverage, all factors enabled)",
 
         # ========== S/R Levels ==========
-        # Ranging market period (EMA20/EMA50 tangled on 4H): 2024-12-01 to 2025-02-23
-        support=92000.0,
-        resistance=106000.0,
-        regime="NEUTRAL_RANGE",  # Neutral ranging strategy
+        # Test period: 2024-12-30 to 2025-01-20
+        support=90000.0,
+        resistance=108000.0,
+        regime="NEUTRAL_RANGE",  # CONTROL TEST: Neutral strategy
 
         # ========== Grid Parameters ==========
         grid_layers_buy=40,
@@ -1085,14 +1130,15 @@ def main():
         enable_console_log=False,
     )
 
-    # Run backtest - STAGE 1: Ranging market test (2024-12-01 to 2025-02-23)
+    # Run backtest - CONTROL TEST: Same period, NEUTRAL_RANGE
     print("=" * 80)
-    print("STAGE 1: Ranging Market Backtest")
+    print("CONTROL TEST: Neutral Range (50/50)")
     print("=" * 80)
-    print(f"Period: ~84 days (2024-12-01 to 2025-02-23)")
-    print(f"Market Condition: EMA20/EMA50 tangled (ranging/consolidation)")
-    print(f"Support/Resistance: $92,000 - $106,000")
-    print(f"Leverage: 5x (reduced from 50x)")
+    print(f"Period: ~22 days (2024-12-30 to 2025-01-20)")
+    print(f"Market Condition: Same market as BULLISH test")
+    print(f"Support/Resistance: $90,000 - $108,000")
+    print(f"Regime: NEUTRAL_RANGE (50% buy, 50% sell)")
+    print(f"Leverage: 5x")
     print(f"Risk Controls: ALL ENABLED")
     print(f"  - MM Risk Zone: ENABLED")
     print(f"  - MR+Trend Factor: ENABLED")
@@ -1106,10 +1152,11 @@ def main():
         config=config,
         symbol="BTCUSDT",
         timeframe="1m",
-        start_date=datetime(2024, 12, 1, tzinfo=timezone.utc),
-        end_date=datetime(2025, 2, 23, tzinfo=timezone.utc),
+        start_date=datetime(2024, 12, 30, tzinfo=timezone.utc),
+        end_date=datetime(2025, 1, 20, tzinfo=timezone.utc),
         verbose=True,
         progress_every=5000,  # Progress update every 5k bars
+        output_dir=Path("run/results_neutral_controlled"),  # Separate dir for NEUTRAL test
     )
     results = runner.run()
 
@@ -1149,8 +1196,8 @@ def main():
 
         print("=" * 80)
 
-    # Save results to separate directory for Stage 1
-    output_dir = runner.output_dir or Path("run/results_stage1_extended")
+    # Save results to separate directory for controlled test
+    output_dir = runner.output_dir or Path("run/results_neutral_controlled")
     runner.save_results(results, output_dir)
 
     print()

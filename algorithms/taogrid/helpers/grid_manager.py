@@ -95,6 +95,10 @@ class GridManager:
         self.buy_weights: Optional[np.ndarray] = None
         self.sell_weights: Optional[np.ndarray] = None
 
+        # Regime allocation ratios (set in setup_grid)
+        self.regime_buy_ratio: float = 0.5
+        self.regime_sell_ratio: float = 0.5
+
         # ATR tracking for spacing calculation
         self.current_atr: float = 0.0
         self.avg_atr: float = 0.0
@@ -220,6 +224,8 @@ class GridManager:
         buy_ratio, sell_ratio = regime_allocations.get(
             self.config.regime, (0.5, 0.5)
         )
+        self.regime_buy_ratio = float(buy_ratio)
+        self.regime_sell_ratio = float(sell_ratio)
         self.buy_weights = self.buy_weights * buy_ratio
         self.sell_weights = self.sell_weights * sell_ratio
         
@@ -592,8 +598,51 @@ class GridManager:
         inventory_state = self.inventory_tracker.get_state()
         # Notional inventory ratio (more relevant for perp/leverage than raw BTC units):
         # inv_ratio = |position_notional| / equity
-        inv_ratio = (abs(float(holdings_btc)) * float(level_price) / float(equity)) if equity > 0 else 999.0
-        inv_ratio_threshold = float(self.config.inventory_capacity_threshold_pct) * float(self.config.leverage)
+        equity_for_inv = float(equity)
+        if getattr(self.config, "inventory_use_equity_floor", False):
+            # Use initial_cash as denominator floor to avoid "too late" inventory gating caused by
+            # equity shrinking after drawdown. This stabilizes the inventory gate and makes it
+            # comparable across regimes.
+            equity_floor = float(getattr(self.config, "initial_cash", equity_for_inv))
+            equity_for_inv = max(equity_for_inv, equity_floor)
+
+        inv_ratio = (abs(float(holdings_btc)) * float(level_price) / float(equity_for_inv)) if equity_for_inv > 0 else 999.0
+
+        # Regime-scaled capacity threshold: buy-heavy regimes must have stricter caps,
+        # otherwise they can accumulate large inventory before any support-based risk zone triggers.
+        base_capacity_pct = float(self.config.inventory_capacity_threshold_pct)
+        if direction == "buy" and getattr(self.config, "enable_regime_inventory_scaling", False):
+            # Use buy/sell imbalance as the scaling driver:
+            # - NEUTRAL (0.5/0.5): scale=1.0 (unchanged)
+            # - BULLISH (0.7/0.3): scale~0.43 => stricter cap (prevents fast inventory accumulation)
+            # - BEARISH (0.3/0.7): scale>1 but clamped by max_pct (no loosening beyond base)
+            buy_ratio = float(getattr(self, "regime_buy_ratio", 0.5))
+            sell_ratio = float(getattr(self, "regime_sell_ratio", 0.5))
+            gamma = float(getattr(self.config, "inventory_regime_gamma", 1.0))
+            scale = (sell_ratio / max(buy_ratio, 1e-9)) ** gamma
+            base_capacity_pct = base_capacity_pct * scale
+            base_capacity_pct = min(
+                float(getattr(self.config, "inventory_capacity_threshold_max_pct", 1.0)),
+                max(float(getattr(self.config, "inventory_capacity_threshold_min_pct", 0.25)), base_capacity_pct),
+            )
+
+        inv_ratio_threshold = base_capacity_pct * float(self.config.leverage)
+
+        # Cost-basis risk zone: if price is sufficiently below avg_cost, stop (or reduce) new BUYs.
+        if direction == "buy" and getattr(self.config, "enable_cost_basis_risk_zone", False) and current_price is not None:
+            avg_cost = self._get_avg_cost_from_positions()
+            if avg_cost is not None and avg_cost > 0:
+                cost_trigger = float(getattr(self.config, "cost_risk_trigger_pct", 0.03))
+                if float(current_price) <= float(avg_cost) * (1.0 - cost_trigger):
+                    from risk_management.grid_risk_manager import ThrottleStatus
+
+                    buy_mult = float(getattr(self.config, "cost_risk_buy_mult", 0.0))
+                    if buy_mult <= 0.0:
+                        return 0.0, ThrottleStatus(
+                            size_multiplier=0.0,
+                            reason="Cost-basis risk zone (price below avg_cost threshold)",
+                        )
+                    base_size_btc = base_size_btc * buy_mult
         if direction == "buy":
             if inv_ratio >= inv_ratio_threshold:
                 from risk_management.grid_risk_manager import ThrottleStatus
@@ -833,6 +882,32 @@ class GridManager:
                 print(f"[ORDER_SIZE] {direction.upper()} L{level_index+1} @ ${level_price:,.0f} - FINAL SIZE={size_btc:.4f} BTC")
         
         return size_btc, throttle_status
+
+    def _get_avg_cost_from_positions(self) -> Optional[float]:
+        """
+        Compute average cost from internal buy_positions ledger.
+
+        Notes:
+        - This uses the position ledger (buy_positions) as source of truth for cost basis.
+        - It is intentionally independent from holdings_btc input to avoid mismatches caused by
+          rounding or partial fills.
+
+        Returns:
+            Average cost (USD) if available, otherwise None.
+        """
+        total_size = 0.0
+        total_cost = 0.0
+        for positions in self.buy_positions.values():
+            for pos in positions:
+                size = float(pos.get("size", 0.0))
+                price = float(pos.get("buy_price", 0.0))
+                if size <= 0.0 or price <= 0.0:
+                    continue
+                total_size += size
+                total_cost += size * price
+        if total_size <= 0.0:
+            return None
+        return total_cost / total_size
 
     def add_buy_position(
         self, buy_level_index: int, size: float, buy_price: float
