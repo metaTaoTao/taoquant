@@ -21,6 +21,7 @@ class BitgetExecutionEngine:
         passphrase: str,
         subaccount_uid: Optional[str] = None,
         debug: bool = False,
+        market_type: str = "spot",
     ):
         """
         Initialize Bitget execution engine.
@@ -50,6 +51,7 @@ class BitgetExecutionEngine:
         self.passphrase = passphrase
         self.subaccount_uid = subaccount_uid
         self.debug = debug
+        self.market_type = str(market_type or "spot").lower()
 
         # Initialize CCXT exchange
         self.exchange = ccxt.bitget(
@@ -58,9 +60,14 @@ class BitgetExecutionEngine:
                 "secret": api_secret,
                 "password": passphrase,  # Bitget passphrase in CCXT
                 "enableRateLimit": True,
-                "options": {"defaultType": "spot"},
+                "options": {"defaultType": self.market_type},
             }
         )
+        try:
+            self.exchange.load_markets()
+        except Exception:
+            # Non-fatal: some environments may fail to load markets intermittently
+            pass
 
         # Track pending orders
         self.pending_orders: Dict[str, Dict[str, Any]] = {}
@@ -318,7 +325,12 @@ class BitgetExecutionEngine:
             - assets: List of asset balances
         """
         try:
-            bal = self.exchange.fetch_balance()
+            # CCXT unified balance; some exchanges honor type/defaultType.
+            # We still pass explicit type to be safe.
+            try:
+                bal = self.exchange.fetch_balance({"type": self.market_type})
+            except Exception:
+                bal = self.exchange.fetch_balance()
 
             assets = []
             total_equity = 0.0
@@ -386,30 +398,59 @@ class BitgetExecutionEngine:
             List of positions
         """
         try:
-            balance = self.get_account_balance()
-            positions = []
+            positions: List[Dict[str, Any]] = []
 
-            # Filter by symbol if provided
-            base_currency = None
-            if symbol:
-                # Extract base currency from symbol (e.g., BTCUSDT -> BTC)
-                base_currency = self._base_currency(symbol)
+            if self.market_type == "spot":
+                balance = self.get_account_balance()
+                base_currency = None
+                if symbol:
+                    base_currency = self._base_currency(symbol)
+                for asset in balance.get("assets", []):
+                    currency = asset.get("currency", "")
+                    total = asset.get("total", 0)
+                    if total > 0:
+                        if base_currency is None or currency == base_currency:
+                            positions.append(
+                                {
+                                    "symbol": symbol or f"{currency}USDT",
+                                    "currency": currency,
+                                    "quantity": total,
+                                    "available": asset.get("available", 0),
+                                    "frozen": asset.get("frozen", 0),
+                                    "unrealized_pnl": 0.0,
+                                    "side": "spot",
+                                    "entry_price": None,
+                                }
+                            )
+                return positions
 
-            for asset in balance.get("assets", []):
-                currency = asset.get("currency", "")
-                total = asset.get("total", 0)
+            # swap / futures: use fetch_positions if supported
+            try:
+                if symbol:
+                    ccxt_symbol = self._convert_symbol(symbol)
+                    raw = self.exchange.fetch_positions([ccxt_symbol], {"type": self.market_type})
+                else:
+                    raw = self.exchange.fetch_positions(None, {"type": self.market_type})
+            except Exception:
+                raw = []
 
-                if total > 0:
-                    if base_currency is None or currency == base_currency:
-                        positions.append({
-                            "symbol": symbol or f"{currency}USDT",
-                            "currency": currency,
-                            "quantity": total,
-                            "available": asset.get("available", 0),
-                            "frozen": asset.get("frozen", 0),
-                            "unrealized_pnl": 0.0,  # Spot doesn't have unrealized PnL
-                        })
-
+            for p in raw or []:
+                qty = float(p.get("contracts") or p.get("contractSize") or p.get("positionAmt") or p.get("size") or 0.0)
+                if qty == 0.0:
+                    continue
+                side = str(p.get("side") or "").lower()
+                entry = p.get("entryPrice") or p.get("entry_price") or p.get("avgCostPrice") or p.get("average")
+                upnl = p.get("unrealizedPnl") or p.get("unrealisedPnl") or p.get("info", {}).get("unrealizedPnl")
+                positions.append(
+                    {
+                        "symbol": str(p.get("symbol") or symbol or ""),
+                        "currency": self._base_currency(symbol) if symbol else "",
+                        "quantity": abs(qty),
+                        "side": side or ("long" if qty > 0 else "short"),
+                        "entry_price": float(entry) if entry is not None else None,
+                        "unrealized_pnl": float(upnl) if upnl is not None else 0.0,
+                    }
+                )
             return positions
 
         except Exception as e:
@@ -433,10 +474,33 @@ class BitgetExecutionEngine:
         """
         upper = symbol.upper()
         if "/" in upper:
-            return upper.replace("-", "/")
-        if upper.endswith("USDT") and len(upper) > 4:
-            return f"{upper[:-4]}/USDT"
-        return upper
+            norm = upper.replace("-", "/")
+        elif upper.endswith("USDT") and len(upper) > 4:
+            norm = f"{upper[:-4]}/USDT"
+        else:
+            norm = upper
+
+        # Bitget USDT perpetual in CCXT is typically formatted as "BTC/USDT:USDT"
+        if self.market_type in ("swap", "future", "futures"):
+            if ":" not in norm and norm.endswith("/USDT"):
+                return f"{norm}:USDT"
+        return norm
+
+    def set_leverage(self, symbol: str, leverage: float) -> bool:
+        """
+        Set leverage for swap/futures (best-effort).
+        """
+        if self.market_type not in ("swap", "future", "futures"):
+            return False
+        try:
+            ccxt_symbol = self._convert_symbol(symbol)
+            lev = int(max(1, float(leverage)))
+            if hasattr(self.exchange, "set_leverage"):
+                self.exchange.set_leverage(lev, ccxt_symbol)
+                return True
+        except Exception:
+            return False
+        return False
 
     @staticmethod
     def _base_currency(symbol: str) -> str:

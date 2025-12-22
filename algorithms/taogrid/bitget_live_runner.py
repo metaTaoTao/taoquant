@@ -68,6 +68,11 @@ class BitgetLiveRunner:
         self.dry_run = dry_run
         self.subaccount_uid = subaccount_uid
         self.execution_model: Dict[str, Any] = execution_model or {}
+        self.market_type: str = str(self.execution_model.get("market_type", "spot") or "spot").lower()
+        # Dry-run fill simulation: if True, we will simulate fills using bar OHLC touch rule
+        # and update an internal paper portfolio (backtest-consistent). This helps validate
+        # "price crossed my limit" scenarios in dry-run.
+        self.simulate_fills_in_dry_run: bool = bool(self.execution_model.get("simulate_fills_in_dry_run", False))
 
         # Execution-model knobs (default matches SimpleLeanRunner)
         self.max_fills_per_bar = max(1, int(self.execution_model.get("max_fills_per_bar", 1)))
@@ -84,6 +89,13 @@ class BitgetLiveRunner:
         self._buy_fills_this_bar: int = 0
         self._buy_notional_added_this_bar: float = 0.0
 
+        # Paper portfolio state (used only when dry_run + simulate_fills_in_dry_run)
+        self._paper_cash: float = float(getattr(self.config, "initial_cash", 0.0))
+        self._paper_long_holdings: float = 0.0
+        self._paper_short_holdings: float = 0.0
+        self._paper_total_cost_basis: float = 0.0
+        self._paper_total_short_entry_value: float = 0.0
+
         # Initialize logger
         self.logger = LiveLogger(log_dir=log_dir, name=f"bitget_live_{symbol}")
 
@@ -93,6 +105,7 @@ class BitgetLiveRunner:
             api_secret=bitget_api_secret,
             passphrase=bitget_passphrase,
             debug=True,
+            market_type=self.market_type,
         )
 
         # Initialize execution engine
@@ -102,6 +115,7 @@ class BitgetLiveRunner:
             passphrase=bitget_passphrase,
             subaccount_uid=subaccount_uid,
             debug=True,
+            market_type=self.market_type,
         )
 
         # Initialize algorithm
@@ -238,13 +252,20 @@ class BitgetLiveRunner:
             self.logger.log_info("[DRY_RUN] Skip bootstrap order placement.")
             return
 
-        # Current BitgetExecutionEngine is spot (defaultType=spot). Short overlay requires contracts.
-        if bool(getattr(self.config, "enable_short_in_bearish", False)):
+        # Short overlay requires contracts.
+        if bool(getattr(self.config, "enable_short_in_bearish", False)) and self.market_type == "spot":
             self.logger.log_warning(
-                "enable_short_in_bearish=True but Bitget engine is spot. "
-                "Short overlay requires contract execution; disabling short for live."
+                "enable_short_in_bearish=True but market_type=spot. "
+                "Short overlay requires swap/futures; disabling short for live."
             )
             self.config.enable_short_in_bearish = False
+
+        # Best-effort: set leverage on swap
+        try:
+            if self.market_type in ("swap", "future", "futures"):
+                _ = self.execution_engine.set_leverage(self.symbol, float(getattr(self.config, "leverage", 1.0)))
+        except Exception:
+            pass
 
         cancelled = self.execution_engine.cancel_all_orders(
             symbol=self.symbol,
@@ -260,12 +281,23 @@ class BitgetLiveRunner:
             latest = self.data_source.get_latest_bar(self.symbol, "1m")
             last_px = float(latest["close"]) if latest else float(self.config.support)
             positions = self.execution_engine.get_positions(self.symbol)
-            exch_holdings = 0.0
+            exch_long = 0.0
+            exch_short = 0.0
             for pos in positions:
-                if pos.get("symbol") == self.symbol or pos.get("currency") == self.symbol.replace("USDT", ""):
-                    exch_holdings = float(pos.get("quantity", 0.0) or 0.0)
-                    break
-            if exch_holdings > float(getattr(self.config, "short_flat_holdings_btc", 0.0005)):
+                sym = str(pos.get("symbol") or "")
+                if self.symbol not in sym and self.symbol.replace("USDT", "") not in sym:
+                    continue
+                side = str(pos.get("side") or "spot").lower()
+                qty = float(pos.get("quantity", 0.0) or 0.0)
+                if self.market_type == "spot":
+                    exch_long = qty
+                else:
+                    if side == "long":
+                        exch_long += qty
+                    elif side == "short":
+                        exch_short += qty
+
+            if exch_long > float(getattr(self.config, "short_flat_holdings_btc", 0.0005)):
                 # Put the whole inventory into ledger at mark-to-market cost (conservative, avoids fake unrealized pnl).
                 gm = self.algorithm.grid_manager
                 if gm.buy_levels is not None and len(gm.buy_levels) > 0:
@@ -275,13 +307,30 @@ class BitgetLiveRunner:
                 else:
                     idx = 0
                 gm.buy_positions.setdefault(idx, []).append(
-                    {"size": float(exch_holdings), "buy_price": float(last_px), "target_sell_level": int(idx)}
+                    {"size": float(exch_long), "buy_price": float(last_px), "target_sell_level": int(idx)}
                 )
                 # Seed inventory tracker exposure too
-                gm.inventory_tracker.update(long_size=float(exch_holdings), grid_level="seed")
+                gm.inventory_tracker.update(long_size=float(exch_long), grid_level="seed_long")
                 self.logger.log_warning(
-                    f"[BOOTSTRAP] Detected existing holdings={exch_holdings:.8f}. "
+                    f"[BOOTSTRAP] Detected existing long={exch_long:.8f}. "
                     f"Seeded ledger at price={last_px:.2f} (unrealized_pnl starts at 0)."
+                )
+
+            if self.market_type != "spot" and exch_short > float(getattr(self.config, "short_flat_holdings_btc", 0.0005)):
+                # Seed short ledger similarly at mark-to-market.
+                gm = self.algorithm.grid_manager
+                if gm.sell_levels is not None and len(gm.sell_levels) > 0:
+                    diffs = [abs(float(p) - last_px) for p in gm.sell_levels]
+                    sidx = int(diffs.index(min(diffs)))
+                else:
+                    sidx = 0
+                gm.short_positions.setdefault(sidx, []).append(
+                    {"size": float(exch_short), "sell_price": float(last_px), "target_buy_level": int(max(0, sidx - 1))}
+                )
+                gm.inventory_tracker.update(short_size=float(exch_short), grid_level="seed_short")
+                self.logger.log_warning(
+                    f"[BOOTSTRAP] Detected existing short={exch_short:.8f}. "
+                    f"Seeded short ledger at price={last_px:.2f} (unrealized_pnl starts at 0)."
                 )
         except Exception as e:
             self.logger.log_warning(f"[BOOTSTRAP] Failed to seed holdings into ledger: {e}")
@@ -396,6 +445,23 @@ class BitgetLiveRunner:
             Portfolio state with equity, cash, holdings, etc.
         """
         try:
+            # Dry-run paper portfolio (optional): provides realistic "fills" behavior without real orders.
+            if bool(self.dry_run) and bool(self.simulate_fills_in_dry_run):
+                px = float(current_price)
+                equity = float(self._paper_cash) + (float(self._paper_long_holdings) * px) - (float(self._paper_short_holdings) * px)
+                unrealized_pnl = (float(self._paper_long_holdings) * px - float(self._paper_total_cost_basis)) + (
+                    float(self._paper_total_short_entry_value) - float(self._paper_short_holdings) * px
+                )
+                return {
+                    "equity": equity,
+                    "cash": float(self._paper_cash),
+                    "holdings": float(self._paper_long_holdings) - float(self._paper_short_holdings),
+                    "long_holdings": float(self._paper_long_holdings),
+                    "short_holdings": float(self._paper_short_holdings),
+                    "unrealized_pnl": float(unrealized_pnl),
+                    "daily_pnl": 0.0,
+                }
+
             balance = self.execution_engine.get_account_balance()
             positions = self.execution_engine.get_positions(self.symbol)
 
@@ -403,36 +469,72 @@ class BitgetLiveRunner:
             available_balance = float(balance.get("available_balance", 0.0) or 0.0)
             frozen_balance = float(balance.get("frozen_balance", 0.0) or 0.0)
 
-            # Exchange holdings for the symbol (spot base asset)
-            exch_holdings = 0.0
+            exch_long = 0.0
+            exch_short = 0.0
             for pos in positions:
-                if pos.get("symbol") == self.symbol or pos.get("currency") == self.symbol.replace("USDT", ""):
-                    exch_holdings = float(pos.get("quantity", 0.0) or 0.0)
-                    break
+                sym = str(pos.get("symbol") or "")
+                if self.symbol not in sym and self.symbol.replace("USDT", "") not in sym:
+                    continue
+                side = str(pos.get("side") or "spot").lower()
+                qty = float(pos.get("quantity", 0.0) or 0.0)
+                if self.market_type == "spot":
+                    exch_long = qty
+                else:
+                    if side == "long":
+                        exch_long += qty
+                    elif side == "short":
+                        exch_short += qty
 
             # Strategy ledger holdings/cost-basis (backtest-consistent for unrealized_pnl)
             ledger_holdings = self._get_holdings_from_ledger()
             total_cost_basis = self._get_total_cost_basis_from_ledger()
+            ledger_short = 0.0
+            ledger_short_entry_value = 0.0
+            for positions_by_level in self.algorithm.grid_manager.short_positions.values():
+                for pos in positions_by_level:
+                    try:
+                        sz = float(pos.get("size", 0.0))
+                        px = float(pos.get("sell_price", 0.0))
+                    except Exception:
+                        continue
+                    if sz > 0 and px > 0:
+                        ledger_short += sz
+                        ledger_short_entry_value += sz * px
 
-            # Spot equity approximation in USDT uses exchange holdings (real account value)
-            total_equity = (available_balance + frozen_balance) + float(exch_holdings) * float(current_price)
+            if self.market_type == "spot":
+                total_equity = (available_balance + frozen_balance) + float(exch_long) * float(current_price)
+            else:
+                # For swap, use balance total_equity if available; fallback to available+frozen.
+                total_equity = float(balance.get("total_equity") or 0.0) or (available_balance + frozen_balance)
 
             # Unrealized PnL uses ledger (same as backtest runner)
-            unrealized_pnl = float(ledger_holdings) * float(current_price) - float(total_cost_basis)
+            long_unreal = float(ledger_holdings) * float(current_price) - float(total_cost_basis)
+            short_unreal = float(ledger_short_entry_value) - float(ledger_short) * float(current_price)
+            unrealized_pnl = long_unreal + short_unreal
 
-            drift = float(exch_holdings) - float(ledger_holdings)
-            if abs(drift) > 1e-6:
-                self.logger.log_warning(
-                    f"[LEDGER_DRIFT] exchange_holdings={exch_holdings:.8f} vs ledger_holdings={ledger_holdings:.8f} "
-                    f"(drift={drift:+.8f}). If you traded manually or restarted bot, consider re-bootstrap."
-                )
+            if self.market_type == "spot":
+                drift = float(exch_long) - float(ledger_holdings)
+                if abs(drift) > 1e-6:
+                    self.logger.log_warning(
+                        f"[LEDGER_DRIFT] exchange_long={exch_long:.8f} vs ledger_long={ledger_holdings:.8f} "
+                        f"(drift={drift:+.8f}). If you traded manually or restarted bot, consider re-bootstrap."
+                    )
+            else:
+                d_long = float(exch_long) - float(ledger_holdings)
+                d_short = float(exch_short) - float(ledger_short)
+                if abs(d_long) > 1e-6 or abs(d_short) > 1e-6:
+                    self.logger.log_warning(
+                        f"[LEDGER_DRIFT] exchange_long={exch_long:.8f} exchange_short={exch_short:.8f} "
+                        f"vs ledger_long={ledger_holdings:.8f} ledger_short={ledger_short:.8f} "
+                        f"(d_long={d_long:+.8f}, d_short={d_short:+.8f})"
+                    )
 
             return {
                 "equity": total_equity,
                 "cash": available_balance,
                 "holdings": ledger_holdings,
                 "long_holdings": ledger_holdings,
-                "short_holdings": 0.0,
+                "short_holdings": ledger_short,
                 "unrealized_pnl": unrealized_pnl,
                 "daily_pnl": 0.0,  # Will be updated by algorithm
             }
@@ -709,6 +811,22 @@ class BitgetLiveRunner:
                 if oid:
                     self.execution_engine.cancel_order(self.symbol, oid)
 
+            # Derivatives position semantics:
+            # - For long grid SELL (leg=None): reduceOnly=True (close/reduce long)
+            # - For short_cover BUY: reduceOnly=True (close/reduce short)
+            # - For short_open SELL: reduceOnly=False (open/increase short)
+            # - For core BUY: reduceOnly=False (open/increase long)
+            params: Dict[str, Any] = {}
+            if self.market_type in ("swap", "future", "futures"):
+                if leg == "short_cover" and direction == "buy":
+                    params["reduceOnly"] = True
+                elif leg == "short_open" and direction == "sell":
+                    params["reduceOnly"] = False
+                elif leg is None and direction == "sell":
+                    params["reduceOnly"] = True
+                else:
+                    params["reduceOnly"] = False
+
             r = self.execution_engine.place_order(
                 symbol=self.symbol,
                 side=direction,
@@ -716,6 +834,7 @@ class BitgetLiveRunner:
                 price=price,
                 order_type="limit",
                 client_order_id=client_oid,
+                params=params or None,
             )
             if r and r.get("order_id"):
                 oid = str(r["order_id"])
@@ -849,6 +968,134 @@ class BitgetLiveRunner:
                         portfolio_state=portfolio_state,
                         live_mode=True,
                     )
+
+                    # Dry-run fill simulation (optional):
+                    # In plain dry-run we only show "planned orders". If simulate_fills_in_dry_run is enabled,
+                    # we additionally simulate fills using OHLC touch rules and update a paper portfolio.
+                    if self.dry_run and self.simulate_fills_in_dry_run:
+                        fills_this_bar = 0
+                        in_cd = self._in_cooldown(bar_timestamp)
+                        while fills_this_bar < int(self.max_fills_per_bar):
+                            triggered = self.algorithm.grid_manager.check_limit_order_triggers(
+                                current_price=float(latest_bar["close"]),
+                                prev_price=None,
+                                bar_high=float(latest_bar["high"]),
+                                bar_low=float(latest_bar["low"]),
+                                bar_index=int(self._bar_index),
+                                range_pos=float(self._last_factor_state.get("range_pos", 0.5)),
+                            )
+                            if not triggered:
+                                break
+
+                            if in_cd and str(triggered.get("direction")) == "buy":
+                                self.algorithm.grid_manager.reset_triggered_orders()
+                                break
+
+                            size, _ = self.algorithm.grid_manager.calculate_order_size(
+                                direction=str(triggered["direction"]),
+                                level_index=int(triggered["level_index"]),
+                                level_price=float(triggered["price"]),
+                                equity=float(portfolio_state.get("equity", self.config.initial_cash)),
+                                daily_pnl=float(portfolio_state.get("daily_pnl", 0.0)),
+                                risk_budget=float(self.algorithm.risk_budget),
+                                holdings_btc=float(portfolio_state.get("holdings", 0.0)),
+                                order_leg=triggered.get("leg"),
+                                current_price=float(latest_bar["close"]),
+                                mr_z=self._last_factor_state.get("mr_z"),
+                                trend_score=self._last_factor_state.get("trend_score"),
+                                breakout_risk_down=self._last_factor_state.get("breakout_risk_down"),
+                                breakout_risk_up=self._last_factor_state.get("breakout_risk_up"),
+                                range_pos=self._last_factor_state.get("range_pos"),
+                                funding_rate=self._last_factor_state.get("funding_rate"),
+                                minutes_to_funding=self._last_factor_state.get("minutes_to_funding"),
+                                vol_score=self._last_factor_state.get("vol_score"),
+                            )
+                            qty = float(size)
+                            if qty <= 0:
+                                triggered["triggered"] = False
+                                triggered["last_checked_bar"] = None
+                                break
+
+                            # Execution price model (same as backtest runner)
+                            limit_px = float(triggered["price"])
+                            bar_open = float(latest_bar["open"])
+                            direction = str(triggered["direction"])
+                            exec_px = min(limit_px, bar_open) if direction == "buy" else max(limit_px, bar_open)
+
+                            commission_rate = float(getattr(self.config, "maker_fee", 0.0))
+                            mkt_px = float(latest_bar["close"])
+                            leg = triggered.get("leg")
+
+                            # Paper portfolio updates (simplified but backtest-consistent)
+                            if leg == "short_open" and direction == "sell":
+                                proceeds = qty * exec_px
+                                commission = proceeds * commission_rate
+                                equity_now = float(self._paper_cash) + (float(self._paper_long_holdings) * mkt_px) - (float(self._paper_short_holdings) * mkt_px)
+                                max_notional = equity_now * float(getattr(self.config, "leverage", 1.0))
+                                new_gross = (float(self._paper_long_holdings) * mkt_px) + ((float(self._paper_short_holdings) + qty) * mkt_px)
+                                if not (equity_now > 0 and new_gross <= max_notional):
+                                    self.algorithm.grid_manager.reset_triggered_orders()
+                                    break
+                                self._paper_cash += proceeds - commission
+                                self._paper_short_holdings += qty
+                                self._paper_total_short_entry_value += qty * exec_px
+                            elif leg == "short_cover" and direction == "buy":
+                                if float(self._paper_short_holdings) <= 1e-12:
+                                    self.algorithm.grid_manager.reset_triggered_orders()
+                                    break
+                                cover = min(qty, float(self._paper_short_holdings))
+                                cost = cover * exec_px
+                                commission = cost * commission_rate
+                                self._paper_cash -= cost + commission
+                                self._paper_short_holdings = max(0.0, float(self._paper_short_holdings) - cover)
+                                self._paper_total_short_entry_value = max(0.0, float(self._paper_total_short_entry_value) - cover * exec_px)
+                                qty = cover
+                            elif direction == "buy":
+                                notional = qty * exec_px
+                                commission = notional * commission_rate
+                                equity_now = float(self._paper_cash) + (float(self._paper_long_holdings) * mkt_px) - (float(self._paper_short_holdings) * mkt_px)
+                                max_notional = equity_now * float(getattr(self.config, "leverage", 1.0))
+                                new_gross = ((float(self._paper_long_holdings) + qty) * mkt_px) + (float(self._paper_short_holdings) * mkt_px)
+                                if not (equity_now > 0 and new_gross <= max_notional):
+                                    self.algorithm.grid_manager.reset_triggered_orders()
+                                    break
+                                self._paper_cash -= notional + commission
+                                self._paper_long_holdings += qty
+                                self._paper_total_cost_basis += notional
+                            else:
+                                # sell long
+                                if qty > float(self._paper_long_holdings) + 1e-12:
+                                    self.algorithm.grid_manager.reset_triggered_orders()
+                                    break
+                                proceeds = qty * exec_px
+                                commission = proceeds * commission_rate
+                                self._paper_cash += proceeds - commission
+                                self._paper_long_holdings = max(0.0, float(self._paper_long_holdings) - qty)
+                                match = self.algorithm.grid_manager.match_sell_order(
+                                    sell_level_index=int(triggered["level_index"]),
+                                    sell_size=float(qty),
+                                )
+                                if match is not None:
+                                    _, buy_price, msz = match
+                                    self._paper_total_cost_basis = max(0.0, float(self._paper_total_cost_basis) - float(msz) * float(buy_price))
+                                    pnl = (float(exec_px) - float(buy_price)) * float(msz)
+                                    self.algorithm.grid_manager.update_realized_pnl(float(pnl))
+
+                            filled_order = {
+                                "direction": direction,
+                                "price": float(exec_px),
+                                "quantity": float(qty),
+                                "level": int(triggered["level_index"]),
+                                "timestamp": bar_timestamp,
+                                "leg": leg,
+                            }
+                            self.algorithm.on_order_filled(filled_order)
+                            fills_this_bar += 1
+                            self.logger.log_info(
+                                f"[DRY_RUN_FILL] {bar_timestamp} {direction.upper()} L{int(triggered['level_index'])+1} "
+                                f"@{exec_px:.2f} qty={qty:.6f} leg={leg or 'long'}"
+                            )
+                            portfolio_state = self._get_portfolio_state(current_price=float(latest_bar["close"]))
 
                     # If grid disabled, cancel all bot orders and skip placing
                     if not bool(self.algorithm.grid_manager.grid_enabled):

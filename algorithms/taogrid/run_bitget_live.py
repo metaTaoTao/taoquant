@@ -108,6 +108,8 @@ def load_config_from_file(config_file: str) -> tuple[TaoGridLeanConfig, dict]:
 
     # Execution-model knobs (match SimpleLeanRunner)
     exec_cfg = {
+        # Bitget market type: "spot" (default) or "swap" (USDT perpetual)
+        "market_type": str(execution_config.get("market_type", "spot")),
         "max_fills_per_bar": int(execution_config.get("max_fills_per_bar", 1)),
         "active_buy_levels": execution_config.get("active_buy_levels", None),
         "cooldown_minutes": int(execution_config.get("cooldown_minutes", 0)),

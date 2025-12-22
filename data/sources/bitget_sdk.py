@@ -32,6 +32,7 @@ class BitgetSDKDataSource(MarketDataSource):
         max_total: int = 2000,
         sleep_seconds: float = 0.2,
         debug: bool = False,
+        market_type: str = "spot",
     ) -> None:
         """
         Initialize Bitget SDK data source.
@@ -73,7 +74,14 @@ class BitgetSDKDataSource(MarketDataSource):
                 }
             )
 
+        self._market_type = str(market_type or "spot").lower()
+        params.setdefault("options", {})
+        params["options"].setdefault("defaultType", self._market_type)
         self._exchange = ccxt.bitget(params)
+        try:
+            self._exchange.load_markets()
+        except Exception:
+            pass
 
         self._max_batch = max_batch
         self._max_total = max_total
@@ -269,11 +277,17 @@ class BitgetSDKDataSource(MarketDataSource):
         """
         upper = symbol.upper()
         if "/" in upper:
-            return upper.replace("-", "/")
-        if upper.endswith("USDT") and len(upper) > 4:
+            norm = upper.replace("-", "/")
+        elif upper.endswith("USDT") and len(upper) > 4:
             base = upper[:-4]
-            return f"{base}/USDT"
-        return upper
+            norm = f"{base}/USDT"
+        else:
+            norm = upper
+
+        if self._market_type in ("swap", "future", "futures"):
+            if ":" not in norm and norm.endswith("/USDT"):
+                return f"{norm}:USDT"
+        return norm
 
     @staticmethod
     def _to_utc(dt: datetime) -> pd.Timestamp:

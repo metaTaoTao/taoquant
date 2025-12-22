@@ -15,12 +15,14 @@
     "cushion_multiplier": 0.8,
     "atr_period": 14,
     "weight_k": 0.0,
-    "leverage": 5.0,
+    "leverage": 50.0,
     "enable_throttling": true,
     "enable_mm_risk_zone": true,
     "enable_console_log": false
   },
   "execution": {
+    "market_type": "swap",
+    "simulate_fills_in_dry_run": true,
     "max_fills_per_bar": 1,
     "active_buy_levels": 6,
     "cooldown_minutes": 2,
