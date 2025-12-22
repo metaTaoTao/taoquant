@@ -95,6 +95,8 @@ class BitgetLiveRunner:
         self._paper_short_holdings: float = 0.0
         self._paper_total_cost_basis: float = 0.0
         self._paper_total_short_entry_value: float = 0.0
+        # Grid snapshot signature (to log when it changes)
+        self._grid_signature: str | None = None
 
         # Initialize logger
         self.logger = LiveLogger(log_dir=log_dir, name=f"bitget_live_{symbol}")
@@ -139,6 +141,50 @@ class BitgetLiveRunner:
         self._initialize_strategy()
         # Bootstrap exchange grid: ensure resting limit orders exist (backtest-consistent)
         self._bootstrap_exchange_grid()
+
+    def _grid_sig(self) -> str:
+        gm = self.algorithm.grid_manager
+        bl = gm.buy_levels
+        sl = gm.sell_levels
+        def _head_tail(arr):
+            if arr is None or len(arr) == 0:
+                return ("NA", "NA")
+            return (f"{float(arr[0]):.2f}", f"{float(arr[-1]):.2f}")
+        b0, bN = _head_tail(bl)
+        s0, sN = _head_tail(sl)
+        nb = len(bl) if bl is not None else 0
+        ns = len(sl) if sl is not None else 0
+        return f"regime={getattr(self.config,'regime',None)} support={float(self.config.support):.2f} resistance={float(self.config.resistance):.2f} nb={nb} ns={ns} b=({b0},{bN}) s=({s0},{sN})"
+
+    def _log_grid_snapshot(self, reason: str) -> None:
+        gm = self.algorithm.grid_manager
+        bl = gm.buy_levels
+        sl = gm.sell_levels
+        spacing = self._estimate_spacing_pct()
+
+        def _sample(arr):
+            if arr is None or len(arr) == 0:
+                return []
+            vals = [float(arr[i]) for i in range(min(3, len(arr)))]
+            if len(arr) > 3:
+                vals += [float(arr[-i]) for i in range(min(3, len(arr)), 0, -1)]
+            # unique while preserving order
+            out = []
+            for v in vals:
+                if v not in out:
+                    out.append(v)
+            return out
+
+        self.logger.log_info(
+            f"[GRID] {reason} market_type={self.market_type} support={float(self.config.support):.0f} "
+            f"resistance={float(self.config.resistance):.0f} regime={getattr(self.config,'regime','')} "
+            f"buy_levels={len(bl) if bl is not None else 0} sell_levels={len(sl) if sl is not None else 0} "
+            f"spacing_est={spacing:.4%}"
+        )
+        if bl is not None and len(bl) > 0:
+            self.logger.log_info("  buy_levels_sample=" + ", ".join([f"{x:.2f}" for x in _sample(bl)]))
+        if sl is not None and len(sl) > 0:
+            self.logger.log_info("  sell_levels_sample=" + ", ".join([f"{x:.2f}" for x in _sample(sl)]))
 
     def _in_cooldown(self, now_ts: datetime) -> bool:
         if self._buy_cooldown_until is None:
@@ -236,6 +282,10 @@ class BitgetLiveRunner:
 
             self.logger.log_info("Strategy initialized successfully")
             self.logger.log_info("=" * 80)
+            # Always print grid snapshot once after init (even when enable_console_log is False)
+            sig = self._grid_sig()
+            self._grid_signature = sig
+            self._log_grid_snapshot("initialized")
 
         except Exception as e:
             self.logger.log_error(f"Failed to initialize strategy: {e}", exc_info=True)
@@ -445,8 +495,10 @@ class BitgetLiveRunner:
             Portfolio state with equity, cash, holdings, etc.
         """
         try:
-            # Dry-run paper portfolio (optional): provides realistic "fills" behavior without real orders.
-            if bool(self.dry_run) and bool(self.simulate_fills_in_dry_run):
+            # DRY-RUN: ALWAYS use paper portfolio based on config.initial_cash.
+            # - If simulate_fills_in_dry_run=False: portfolio stays static (cash=initial_cash, no holdings).
+            # - If simulate_fills_in_dry_run=True: portfolio is updated by OHLC fill simulation in run().
+            if bool(self.dry_run):
                 px = float(current_price)
                 equity = float(self._paper_cash) + (float(self._paper_long_holdings) * px) - (float(self._paper_short_holdings) * px)
                 unrealized_pnl = (float(self._paper_long_holdings) * px - float(self._paper_total_cost_basis)) + (
@@ -606,6 +658,14 @@ class BitgetLiveRunner:
 
                                 # Update strategy
                                 self.algorithm.on_order_filled(filled_order)
+
+                                # Explicit fill log (high-signal, easy to grep)
+                                self.logger.log_info(
+                                    f"[ORDER_FILLED] order_id={order_id} side={filled_order['direction']} "
+                                    f"price={float(filled_order['price']):.2f} qty={float(filled_order['quantity']):.6f} "
+                                    f"level={int(filled_order.get('level', -1))} leg={filled_order.get('leg') or 'long'} "
+                                    f"status={status}"
+                                )
 
                                 self.logger.log_order(
                                     order_id=order_id,
@@ -921,6 +981,14 @@ class BitgetLiveRunner:
 
                     # Get portfolio state
                     portfolio_state = self._get_portfolio_state(current_price=float(latest_bar["close"]))
+
+                    # Log grid snapshot if it changed (e.g., future mid-shift / manual update)
+                    sig = self._grid_sig()
+                    if self._grid_signature is None:
+                        self._grid_signature = sig
+                    elif sig != self._grid_signature:
+                        self._grid_signature = sig
+                        self._log_grid_snapshot("updated")
 
                     # Log portfolio state periodically
                     self.logger.log_portfolio(
