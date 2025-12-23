@@ -136,6 +136,12 @@ class BitgetExecutionEngine:
             self.pending_orders[order_id] = info
             return info
         except Exception as e:
+            # Always log order errors (critical for debugging live trading issues)
+            import logging
+            logging.getLogger(__name__).error(
+                f"[Bitget place_order FAILED] symbol={symbol} side={side} qty={quantity} price={price} "
+                f"client_oid={client_order_id} error={e}"
+            )
             if self.debug:
                 print(f"[Bitget CCXT Engine] Error placing order: {e}")
                 import traceback
