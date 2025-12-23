@@ -89,22 +89,24 @@ def _require_systemctl() -> None:
 
 def _systemctl(action: str) -> Dict[str, Any]:
     # For cloud (Linux) use systemd; return structured info.
+    # Use sudo to ensure we have permission to control services
     if not _has_systemctl():
         return {
             "ok": False,
             "returncode": 127,
             "status": "unsupported",
             "stderr": "systemctl not available",
-            "cmd": ["systemctl", action, SERVICE_NAME],
+            "cmd": ["sudo", "systemctl", action, SERVICE_NAME],
             "ts": _now_iso(),
         }
-    p = _run(["systemctl", action, SERVICE_NAME], timeout=30)
+    # Use sudo for service control (requires sudoers config)
+    p = _run(["sudo", "systemctl", action, SERVICE_NAME], timeout=30)
     return {
         "ok": p.returncode == 0,
         "returncode": p.returncode,
         "stdout": p.stdout,
         "stderr": p.stderr,
-        "cmd": ["systemctl", action, SERVICE_NAME],
+        "cmd": ["sudo", "systemctl", action, SERVICE_NAME],
         "ts": _now_iso(),
     }
 
@@ -118,7 +120,8 @@ def _systemctl_is_active() -> Dict[str, Any]:
             "stderr": "systemctl not available",
             "ts": _now_iso(),
         }
-    p = _run(["systemctl", "is-active", SERVICE_NAME], timeout=10)
+    # Use sudo for consistency (though is-active usually doesn't require it)
+    p = _run(["sudo", "systemctl", "is-active", SERVICE_NAME], timeout=10)
     status = (p.stdout or "").strip()
     return {
         "ok": p.returncode == 0,
