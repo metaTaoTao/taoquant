@@ -469,12 +469,42 @@ def api_status(request: Request, bot_id: Optional[str] = None) -> Dict[str, Any]
 
 
 @app.get("/api/logs", response_class=PlainTextResponse)
-def api_logs(request: Request, tail: int = 200) -> str:
+def api_logs(
+    request: Request,
+    tail: int = 200,
+    source: str = "file",
+    unit: str = "taoquant-runner",
+) -> str:
+    """
+    Get recent logs.
+
+    source:
+      - file: latest log file under TAOQUANT_LOG_DIR (default)
+      - journal: systemd journalctl for a service unit
+    unit:
+      - taoquant-runner / taoquant-dashboard (service name without .service)
+    """
     _require_auth(request)
+    tail_n = max(0, min(int(tail), 5000))
+    src = str(source or "file").strip().lower()
+
+    if src in ("journal", "journalctl", "systemd"):
+        _require_systemctl()
+        u = str(unit or "taoquant-runner").strip()
+        if not u.endswith(".service"):
+            u = f"{u}.service"
+        # Safety: allow only taoquant-* service units
+        if not u.startswith("taoquant-") or not u.endswith(".service"):
+            raise HTTPException(status_code=400, detail="Invalid unit")
+        r = _run(["journalctl", "-u", u, "-n", str(tail_n), "--no-pager"], timeout=20)
+        out = (r.stdout or "") + (("\n" + r.stderr) if r.stderr else "")
+        return out.strip() or f"(no journal output for {u})"
+
+    # Default: latest log file from disk
     f = _latest_log_file()
     if not f:
         return f"(no log files in {LOG_DIR})"
-    return _tail_text(f, n=max(0, min(int(tail), 5000)))
+    return _tail_text(f, n=tail_n)
 
 
 @app.get("/api/bot/status")

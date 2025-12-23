@@ -718,6 +718,24 @@
         </table>
     </div>
 
+    <!-- Core Logs (for debugging) -->
+    <h2 class="section-header">Core Logs</h2>
+    <div class="table-container">
+        <div class="table-header" style="display:flex; gap:10px; align-items:center; justify-content:space-between;">
+            <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+                <span class="text-muted" style="font-family: var(--font-mono); font-size: 12px;">Source:</span>
+                <button class="badge badge-info" type="button" onclick="setLogSource('file','taoquant-runner')">Runner (file)</button>
+                <button class="badge badge-info" type="button" onclick="setLogSource('journal','taoquant-runner')">Runner (journal)</button>
+                <button class="badge badge-info" type="button" onclick="setLogSource('journal','taoquant-dashboard')">Dashboard (journal)</button>
+                <span class="text-muted" style="font-family: var(--font-mono); font-size: 12px;">Tail:</span>
+                <input id="log-tail" value="200" style="width:90px; padding:6px 8px; background: var(--bg-primary); border:1px solid var(--border-color); border-radius:6px; color: var(--text-primary); font-family: var(--font-mono); font-size:12px;" />
+                <button class="badge badge-info" type="button" onclick="refreshLogsOnce()">Refresh</button>
+            </div>
+            <div class="text-dim" id="log-meta" style="font-family: var(--font-mono); font-size: 12px;">-</div>
+        </div>
+        <pre id="core-logs" style="margin:0; padding:16px; background: rgba(0,0,0,0.25); color: var(--text-secondary); font-family: var(--font-mono); font-size: 12px; max-height: 420px; overflow: auto;">(loading...)</pre>
+    </div>
+
     <script>
         // Authentication state
         const REQUIRES_AUTH = {{ requires_auth|tojson }};
@@ -912,6 +930,13 @@
                     const normMode = rawMode ? rawMode.replace(/_/g, '').toUpperCase() : 'UNKNOWN';
                     const cls = (normMode === 'LIVE') ? 'text-green' : (normMode.startsWith('DRY') ? 'text-cyan' : 'text-orange');
                     modeEl.innerHTML = `MODE: <span class="${cls}">${normMode}</span>`;
+                }
+
+                // Update core logs (best-effort)
+                try {
+                    await refreshLogs(headers);
+                } catch (e) {
+                    // ignore
                 }
 
                 // Update Portfolio section
@@ -1129,6 +1154,47 @@
             } catch (error) {
                 console.error('Failed to update dashboard:', error);
             }
+        }
+
+        // ---------------- Core Logs helpers ----------------
+        let LOG_SOURCE = 'file';   // 'file' | 'journal'
+        let LOG_UNIT = 'taoquant-runner';
+
+        function setLogSource(source, unit) {
+            LOG_SOURCE = source;
+            LOG_UNIT = unit;
+            refreshLogsOnce();
+        }
+
+        function getLogTail() {
+            const el = document.getElementById('log-tail');
+            const n = Number(el && el.value ? el.value : 200);
+            if (!isFinite(n)) return 200;
+            return Math.max(20, Math.min(5000, Math.floor(n)));
+        }
+
+        async function refreshLogs(headers) {
+            const pre = document.getElementById('core-logs');
+            const meta = document.getElementById('log-meta');
+            const tail = getLogTail();
+            const qs = new URLSearchParams({ tail: String(tail), source: String(LOG_SOURCE), unit: String(LOG_UNIT) });
+            const r = await fetch('/api/logs?' + qs.toString(), { headers: headers || {} });
+            if (!r.ok) {
+                const t = await r.text();
+                if (pre) pre.textContent = t || `(logs error: ${r.status})`;
+                if (meta) meta.textContent = `source=${LOG_SOURCE} unit=${LOG_UNIT} (HTTP ${r.status})`;
+                return;
+            }
+            const text = await r.text();
+            if (pre) pre.textContent = text || '(empty)';
+            if (meta) meta.textContent = `source=${LOG_SOURCE} unit=${LOG_UNIT} tail=${tail} @ ${new Date().toISOString().substring(11,19)}Z`;
+        }
+
+        async function refreshLogsOnce() {
+            const headers = {};
+            const token = getStoredToken();
+            if (token) headers['Authorization'] = `Bearer ${token}`;
+            await refreshLogs(headers);
         }
 
         // Initial load (only if authenticated or no auth required)
