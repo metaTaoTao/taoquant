@@ -306,6 +306,127 @@
             font-style: italic;
         }
 
+        /* ==================== Login Modal ==================== */
+        .login-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(15, 23, 41, 0.95);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 10000;
+        }
+
+        .login-modal {
+            background: var(--bg-card);
+            border: 1px solid var(--border-highlight);
+            border-radius: 12px;
+            padding: 32px;
+            min-width: 400px;
+            max-width: 500px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+        }
+
+        .login-modal h2 {
+            font-size: 24px;
+            margin-bottom: 8px;
+            color: var(--text-primary);
+        }
+
+        .login-modal p {
+            color: var(--text-muted);
+            font-size: 14px;
+            margin-bottom: 24px;
+        }
+
+        .login-form-group {
+            margin-bottom: 20px;
+        }
+
+        .login-form-group label {
+            display: block;
+            font-size: 13px;
+            color: var(--text-muted);
+            margin-bottom: 8px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .login-form-group input {
+            width: 100%;
+            padding: 12px;
+            background: var(--bg-primary);
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            color: var(--text-primary);
+            font-family: var(--font-mono);
+            font-size: 14px;
+            transition: border-color 0.2s;
+        }
+
+        .login-form-group input:focus {
+            outline: none;
+            border-color: var(--border-highlight);
+        }
+
+        .login-button {
+            width: 100%;
+            padding: 12px;
+            background: var(--accent-blue);
+            border: none;
+            border-radius: 6px;
+            color: var(--text-primary);
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+
+        .login-button:hover {
+            background: #3a7bc8;
+        }
+
+        .login-button:disabled {
+            background: var(--text-dim);
+            cursor: not-allowed;
+        }
+
+        .login-error {
+            margin-top: 12px;
+            padding: 10px;
+            background: rgba(239, 68, 68, 0.15);
+            border: 1px solid var(--danger-red);
+            border-radius: 6px;
+            color: var(--danger-red);
+            font-size: 13px;
+            display: none;
+        }
+
+        .login-error.show {
+            display: block;
+        }
+
+        .login-logout {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            padding: 8px 16px;
+            background: rgba(239, 68, 68, 0.15);
+            border: 1px solid var(--danger-red);
+            border-radius: 6px;
+            color: var(--danger-red);
+            font-size: 12px;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+
+        .login-logout:hover {
+            background: rgba(239, 68, 68, 0.25);
+        }
+
         /* ==================== Responsive ==================== */
         @media (max-width: 1024px) {
             .grid-4 { grid-template-columns: repeat(2, 1fr); }
@@ -322,10 +443,37 @@
 
             .card-value { font-size: 24px; }
             .header { flex-direction: column; align-items: flex-start; }
+            .login-modal { min-width: 90%; padding: 24px; }
         }
     </style>
 </head>
 <body>
+    <!-- Login Overlay -->
+    <div id="login-overlay" class="login-overlay" style="display: none;">
+        <div class="login-modal">
+            <h2>🔐 Dashboard 登录</h2>
+            <p>请输入访问令牌以查看实时交易数据</p>
+            <form id="login-form">
+                <div class="login-form-group">
+                    <label for="token-input">访问令牌 (Token)</label>
+                    <input 
+                        type="password" 
+                        id="token-input" 
+                        placeholder="输入你的 TAOQUANT_DASHBOARD_TOKEN"
+                        autocomplete="off"
+                        autofocus
+                    />
+                </div>
+                <button type="submit" class="login-button" id="login-button">登录</button>
+                <div class="login-error" id="login-error">
+                    令牌无效，请检查后重试
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Logout Button (shown when authenticated) -->
+    <button id="logout-button" class="login-logout" style="display: none;" onclick="logout()">登出</button>
     <!-- Header -->
     <div class="header">
         <h1>TaoQuant Live Trading Dashboard</h1>
@@ -561,6 +709,104 @@
     </div>
 
     <script>
+        // Authentication state
+        const REQUIRES_AUTH = {{ requires_auth|tojson }};
+        const TOKEN_STORAGE_KEY = 'taoquant_dashboard_token';
+        
+        // Get token from localStorage or null
+        function getStoredToken() {
+            return localStorage.getItem(TOKEN_STORAGE_KEY);
+        }
+        
+        // Store token to localStorage
+        function storeToken(token) {
+            localStorage.setItem(TOKEN_STORAGE_KEY, token);
+        }
+        
+        // Remove token from localStorage
+        function removeToken() {
+            localStorage.removeItem(TOKEN_STORAGE_KEY);
+        }
+        
+        // Show/hide login overlay
+        function showLogin() {
+            if (REQUIRES_AUTH && !getStoredToken()) {
+                document.getElementById('login-overlay').style.display = 'flex';
+                document.getElementById('logout-button').style.display = 'none';
+            } else {
+                document.getElementById('login-overlay').style.display = 'none';
+                if (REQUIRES_AUTH) {
+                    document.getElementById('logout-button').style.display = 'block';
+                }
+            }
+        }
+        
+        // Logout function
+        function logout() {
+            if (confirm('确定要登出吗？')) {
+                removeToken();
+                showLogin();
+                // Clear dashboard data
+                document.getElementById('equity').textContent = '-';
+                document.getElementById('current-time').textContent = '已登出';
+            }
+        }
+        
+        // Validate token by making a test API call
+        async function validateToken(token) {
+            try {
+                const response = await fetch('/api/status', {
+                    headers: {
+                        'Authorization': `Bearer ${token}`
+                    }
+                });
+                return response.ok;
+            } catch (error) {
+                console.error('Token validation error:', error);
+                return false;
+            }
+        }
+        
+        // Login form handler
+        document.getElementById('login-form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const tokenInput = document.getElementById('token-input');
+            const loginButton = document.getElementById('login-button');
+            const errorDiv = document.getElementById('login-error');
+            const token = tokenInput.value.trim();
+            
+            if (!token) {
+                errorDiv.textContent = '请输入访问令牌';
+                errorDiv.classList.add('show');
+                return;
+            }
+            
+            // Disable button and show loading
+            loginButton.disabled = true;
+            loginButton.textContent = '验证中...';
+            errorDiv.classList.remove('show');
+            
+            // Validate token
+            const isValid = await validateToken(token);
+            
+            if (isValid) {
+                storeToken(token);
+                showLogin();
+                // Start dashboard updates
+                updateDashboard();
+            } else {
+                errorDiv.textContent = '令牌无效，请检查后重试';
+                errorDiv.classList.add('show');
+                tokenInput.focus();
+            }
+            
+            loginButton.disabled = false;
+            loginButton.textContent = '登录';
+        });
+        
+        // Check authentication on page load
+        showLogin();
+        
         // Format number with commas
         function formatNumber(num, decimals = 2) {
             if (num === null || num === undefined) return 'N/A';
@@ -618,8 +864,32 @@
 
         // Update all dashboard data
         async function updateDashboard() {
+            // Check if we need auth and have token
+            if (REQUIRES_AUTH && !getStoredToken()) {
+                showLogin();
+                return;
+            }
+            
             try {
-                const response = await fetch('/api/status');
+                const headers = {};
+                const token = getStoredToken();
+                if (token) {
+                    headers['Authorization'] = `Bearer ${token}`;
+                }
+                
+                const response = await fetch('/api/status', { headers });
+                
+                if (response.status === 401) {
+                    // Token invalid, clear and show login
+                    removeToken();
+                    showLogin();
+                    return;
+                }
+                
+                if (!response.ok) {
+                    throw new Error(`API error: ${response.status} ${response.statusText}`);
+                }
+                
                 const data = await response.json();
 
                 // Update current time
@@ -788,11 +1058,12 @@
             }
         }
 
-        // Initial load
-        updateDashboard();
-
-        // Auto-refresh every 5 seconds
-        setInterval(updateDashboard, 5000);
+        // Initial load (only if authenticated or no auth required)
+        if (!REQUIRES_AUTH || getStoredToken()) {
+            updateDashboard();
+            // Auto-refresh every 5 seconds
+            setInterval(updateDashboard, 5000);
+        }
     </script>
 </body>
 </html>

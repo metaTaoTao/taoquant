@@ -227,6 +227,7 @@ def home(request: Request):
         "request": request,
         "mode": mode,
         "status": st,
+        "requires_auth": bool(TOKEN),  # Whether authentication is required
     })
 
 @app.get("/legacy", response_class=HTMLResponse)

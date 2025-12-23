@@ -36,11 +36,24 @@ fi
 echo ""
 echo "Test 2: Dashboard HTTP endpoint..."
 DASHBOARD_URL="http://127.0.0.1:8000/api/status"
-if curl -s -f "$DASHBOARD_URL" > /dev/null 2>&1; then
+AUTH_HEADER=""
+if [ -n "$TAOQUANT_DASHBOARD_TOKEN" ]; then
+    AUTH_HEADER="Authorization: Bearer ${TAOQUANT_DASHBOARD_TOKEN}"
+fi
+
+if [ -n "$AUTH_HEADER" ]; then
+    CURL_OK_CMD=(curl -s -f -H "$AUTH_HEADER" "$DASHBOARD_URL")
+    CURL_CMD=(curl -s -H "$AUTH_HEADER" "$DASHBOARD_URL")
+else
+    CURL_OK_CMD=(curl -s -f "$DASHBOARD_URL")
+    CURL_CMD=(curl -s "$DASHBOARD_URL")
+fi
+
+if "${CURL_OK_CMD[@]}" > /dev/null 2>&1; then
     _pass "Dashboard API responds"
     
     # Check status content
-    STATUS=$(curl -s "$DASHBOARD_URL")
+    STATUS=$("${CURL_CMD[@]}")
     if echo "$STATUS" | grep -q '"mode"'; then
         MODE=$(echo "$STATUS" | grep -o '"mode":"[^"]*"' | cut -d'"' -f4)
         _pass "Dashboard returns status (mode: $MODE)"
@@ -48,7 +61,11 @@ if curl -s -f "$DASHBOARD_URL" > /dev/null 2>&1; then
         _warn "Dashboard returns but status format unexpected"
     fi
 else
-    _fail "Dashboard API not responding (check: curl $DASHBOARD_URL)"
+    if [ -n "$AUTH_HEADER" ]; then
+        _fail "Dashboard API not responding (check: curl -H \"$AUTH_HEADER\" $DASHBOARD_URL)"
+    else
+        _fail "Dashboard API not responding (check: curl $DASHBOARD_URL)"
+    fi
 fi
 
 # Test 3: Check recent logs for errors
