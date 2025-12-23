@@ -508,9 +508,10 @@ class BitgetLiveRunner:
             pass
 
         # Seed internal ledger from current exchange holdings (restart-safe baseline).
+        last_px: float = float(getattr(self.config, "support", 0.0) or 0.0) or 1.0
         try:
             latest = self.data_source.get_latest_bar(self.symbol, "1m")
-            last_px = float(latest["close"]) if latest else float(self.config.support)
+            last_px = float(latest["close"]) if latest else last_px
             positions = self.execution_engine.get_positions(self.symbol)
             # Best-effort: persist positions snapshot immediately
             try:
@@ -583,7 +584,9 @@ class BitgetLiveRunner:
             pass
 
         # Place initial grid orders
-        self._sync_exchange_orders(current_price=None)
+        # IMPORTANT: pass current price so we don't place crossing orders at bootstrap
+        # (otherwise BUY above market / SELL below market can execute immediately as taker).
+        self._sync_exchange_orders(current_price=float(last_px))
 
     def _replay_fills_best_effort(self) -> None:
         """
@@ -1088,7 +1091,8 @@ class BitgetLiveRunner:
 
                     if order_status:
                         status = order_status.get("status", "").lower()
-                        if status in ["filled", "partially_filled"]:
+                        # CCXT often returns "closed" for fully-filled orders.
+                        if status in ["filled", "closed", "partially_filled"]:
                             filled_quantity = float(order_status.get("filled_quantity", 0.0) or 0.0)
                             prev_processed = float(order_info.get("_processed_filled_qty", 0.0) or 0.0)
                             delta_qty = max(0.0, filled_quantity - prev_processed)
@@ -1124,6 +1128,34 @@ class BitgetLiveRunner:
 
                                 # Update strategy
                                 self.algorithm.on_order_filled(filled_order)
+
+                                # Dashboard/order blotter (best-effort, in-memory + state/blotter.jsonl)
+                                try:
+                                    notional = float(delta_qty) * float(px)
+                                    fee_est = float(notional) * float(getattr(self.config, "maker_fee", 0.0) or 0.0)
+                                    portfolio_state = self._get_portfolio_state(current_price=float(px))
+                                    blotter_event = {
+                                        "ts": pd.Timestamp(datetime.now(timezone.utc)).tz_convert("UTC").isoformat(),
+                                        "symbol": str(self.symbol),
+                                        "side": str(filled_order["direction"]).upper(),
+                                        "level": int(filled_order.get("level", -1)) + 1 if int(filled_order.get("level", -1)) >= 0 else 0,
+                                        "px": float(px),
+                                        "qty": float(delta_qty),
+                                        "notional": float(notional),
+                                        "fee_est": float(fee_est),
+                                        "leg": (filled_order.get("leg") or "long"),
+                                        "cash": float(portfolio_state.get("cash", 0.0) or 0.0),
+                                        "net_pos": float(portfolio_state.get("holdings", 0.0) or 0.0),
+                                        "unreal": float(portfolio_state.get("unrealized_pnl", 0.0) or 0.0),
+                                    }
+                                    self._append_blotter_event(blotter_event)
+                                    self.logger.log_info(
+                                        f"[BLOTTER] {filled_order['timestamp']} {str(filled_order['direction']).upper()} "
+                                        f"L{blotter_event['level']} px={float(px):.2f} qty={float(delta_qty):.6f} "
+                                        f"notional={float(notional):.2f} fee_est={float(fee_est):.4f}"
+                                    )
+                                except Exception:
+                                    pass
 
                                 # Explicit fill log (high-signal, easy to grep)
                                 self.logger.log_info(
