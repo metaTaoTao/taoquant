@@ -1521,8 +1521,17 @@ class BitgetLiveRunner:
             if client_oid in open_by_client:
                 oo = open_by_client[client_oid]
                 open_qty = float(oo.get("quantity", 0.0) or 0.0)
-                if open_qty > 0 and abs(open_qty - qty) / open_qty < 0.05:
+                # Use 20% tolerance because exchange may truncate/round our quantity
+                # (e.g., we send 0.000795, exchange accepts 0.0007 due to precision)
+                # If order exists with similar quantity, skip (don't replace)
+                if open_qty > 0 and abs(open_qty - qty) / max(open_qty, qty) < 0.20:
                     continue
+                # Only replace if quantity difference is significant (>20%)
+                # Log when replacing to help debug
+                self.logger.log_info(
+                    f"[ORDER_REPLACE] {client_oid} qty mismatch: open={open_qty:.6f} vs target={qty:.6f} "
+                    f"(diff={(abs(open_qty - qty) / max(open_qty, qty) * 100):.1f}%)"
+                )
                 oid = str(oo.get("order_id") or "")
                 if oid:
                     if self._safety_can_cancel(now=now_ts):
