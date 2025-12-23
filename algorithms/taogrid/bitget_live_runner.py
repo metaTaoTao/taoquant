@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import sys
 import time
+import json
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any
@@ -95,6 +96,11 @@ class BitgetLiveRunner:
         self._paper_short_holdings: float = 0.0
         self._paper_total_cost_basis: float = 0.0
         self._paper_total_short_entry_value: float = 0.0
+        # Estimated commissions (dry-run only; in live we would need exchange fills/fees)
+        self._paper_commission_paid: float = 0.0
+        # In-memory blotter (for periodic reporting / dashboard integration)
+        self._blotter_events: list[dict] = []
+        self._blotter_maxlen: int = 200
         # Grid snapshot signature (to log when it changes)
         self._grid_signature: str | None = None
 
@@ -291,6 +297,85 @@ class BitgetLiveRunner:
             self.logger.log_error(f"Failed to initialize strategy: {e}", exc_info=True)
             raise
 
+    def _write_status_snapshot(
+        self,
+        *,
+        bar_timestamp: datetime,
+        latest_bar: dict,
+        portfolio_state: Dict[str, Any],
+    ) -> None:
+        """
+        Write a compact status snapshot for dashboard/monitoring.
+
+        This is intentionally file-based (no extra infra). The dashboard can read
+        `state/live_status.json` to show PnL/risk/grid state.
+        """
+        try:
+            base = Path(getattr(self.config, "state_dir", "state"))
+            base.mkdir(parents=True, exist_ok=True)
+            status_path = base / "live_status.json"
+
+            gm = self.algorithm.grid_manager
+
+            realized = float(getattr(gm, "realized_pnl", 0.0) or 0.0)
+            risk_level = int(getattr(gm, "risk_level", 0) or 0)
+            grid_enabled = bool(getattr(gm, "grid_enabled", True))
+            shutdown_reason = getattr(gm, "grid_shutdown_reason", None)
+
+            # Buy/sell ranges are helpful when troubleshooting "grid is far away".
+            buy_min = float(gm.buy_levels.min()) if getattr(gm, "buy_levels", None) is not None and len(gm.buy_levels) > 0 else None
+            buy_max = float(gm.buy_levels.max()) if getattr(gm, "buy_levels", None) is not None and len(gm.buy_levels) > 0 else None
+            sell_min = float(gm.sell_levels.min()) if getattr(gm, "sell_levels", None) is not None and len(gm.sell_levels) > 0 else None
+            sell_max = float(gm.sell_levels.max()) if getattr(gm, "sell_levels", None) is not None and len(gm.sell_levels) > 0 else None
+
+            doc = {
+                "ts": pd.Timestamp(bar_timestamp).tz_convert("UTC").isoformat(),
+                "mode": "dry_run" if bool(self.dry_run) else "live",
+                "symbol": str(self.symbol),
+                "market_type": str(self.market_type),
+                "market": {
+                    "open": float(latest_bar.get("open", 0.0) or 0.0),
+                    "high": float(latest_bar.get("high", 0.0) or 0.0),
+                    "low": float(latest_bar.get("low", 0.0) or 0.0),
+                    "close": float(latest_bar.get("close", 0.0) or 0.0),
+                    "volume": float(latest_bar.get("volume", 0.0) or 0.0),
+                },
+                "portfolio": {
+                    "equity": float(portfolio_state.get("equity", 0.0) or 0.0),
+                    "cash": float(portfolio_state.get("cash", 0.0) or 0.0),
+                    "holdings": float(portfolio_state.get("holdings", 0.0) or 0.0),
+                    "long_holdings": float(portfolio_state.get("long_holdings", 0.0) or 0.0),
+                    "short_holdings": float(portfolio_state.get("short_holdings", 0.0) or 0.0),
+                    "unrealized_pnl": float(portfolio_state.get("unrealized_pnl", 0.0) or 0.0),
+                    "realized_pnl": realized,
+                },
+                "risk": {
+                    "risk_level": risk_level,
+                    "grid_enabled": grid_enabled,
+                    "shutdown_reason": shutdown_reason,
+                    "in_cooldown": bool(self._in_cooldown(bar_timestamp)),
+                },
+                "grid": {
+                    "support": float(getattr(self.config, "support", 0.0) or 0.0),
+                    "resistance": float(getattr(self.config, "resistance", 0.0) or 0.0),
+                    "atr": float(getattr(gm, "current_atr", 0.0) or 0.0),
+                    "buy_levels": int(len(getattr(gm, "buy_levels", []) or [])),
+                    "sell_levels": int(len(getattr(gm, "sell_levels", []) or [])),
+                    "buy_range": [buy_min, buy_max],
+                    "sell_range": [sell_min, sell_max],
+                    "active_buy_levels": self.active_buy_levels,
+                },
+                "factors": dict(self._last_factor_state or {}),
+            }
+
+            # atomic write
+            tmp = status_path.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(doc, ensure_ascii=False, indent=2), encoding="utf-8")
+            tmp.replace(status_path)
+        except Exception:
+            # Do not crash trading loop because dashboard snapshot failed
+            return
+
     def _bootstrap_exchange_grid(self) -> None:
         """
         Ensure exchange open orders reflect the algorithm's pending grid orders.
@@ -484,6 +569,146 @@ class BitgetLiveRunner:
                 if sz > 0:
                     total_sz += sz
         return float(total_sz)
+
+    def _get_avg_cost_from_ledger(self) -> float | None:
+        h = float(self._get_holdings_from_ledger())
+        if h <= 0:
+            return None
+        cb = float(self._get_total_cost_basis_from_ledger())
+        return float(cb / h) if cb > 0 else None
+
+    def _log_summary(self, *, ts: datetime, current_price: float, portfolio_state: Dict[str, Any]) -> None:
+        """
+        Compact risk/PnL summary line for easy grepping.
+        """
+        try:
+            px = float(current_price)
+            equity = float(portfolio_state.get("equity", 0.0) or 0.0)
+            long_h = float(portfolio_state.get("long_holdings", portfolio_state.get("holdings", 0.0)) or 0.0)
+            short_h = float(portfolio_state.get("short_holdings", 0.0) or 0.0)
+            net = float(long_h) - float(short_h)
+            unreal = float(portfolio_state.get("unrealized_pnl", 0.0) or 0.0)
+            gm = self.algorithm.grid_manager
+            realized = float(getattr(gm, "realized_pnl", 0.0) or 0.0)
+            avg_cost = self._get_avg_cost_from_ledger()
+            # Effective leverage = gross notional / equity (best-effort)
+            gross_notional = (abs(float(long_h)) + abs(float(short_h))) * px
+            eff_lev = (gross_notional / equity) if equity > 0 else 0.0
+            fees = float(self._paper_commission_paid) if bool(self.dry_run) else 0.0
+
+            self.logger.log_info(
+                f"[SUMMARY] {ts} price={px:.2f} net_pos={net:.6f} "
+                f"avg_cost={(avg_cost if avg_cost is not None else float('nan')):.2f} "
+                f"unreal={unreal:+.2f} realized={realized:+.2f} "
+                f"equity={equity:.2f} eff_lev={eff_lev:.2f} fees_est={fees:.4f}"
+            )
+        except Exception:
+            return
+
+    def _append_blotter_event(self, event: Dict[str, Any]) -> None:
+        """Store blotter event in memory and append to state/blotter.jsonl (best-effort)."""
+        try:
+            self._blotter_events.append(event)
+            if len(self._blotter_events) > int(self._blotter_maxlen):
+                self._blotter_events = self._blotter_events[-int(self._blotter_maxlen):]
+
+            base = Path(getattr(self.config, "state_dir", "state"))
+            base.mkdir(parents=True, exist_ok=True)
+            path = base / "blotter.jsonl"
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(event, ensure_ascii=False) + "\n")
+        except Exception:
+            return
+
+    def _emit_periodic_reports(self, *, ts: datetime, current_price: float, portfolio_state: Dict[str, Any]) -> None:
+        """
+        Emit a heartbeat summary + blotter snapshot every 5 minutes (assuming 1m bars).
+
+        Even if there are no fills, we still emit the summary and an empty blotter snapshot.
+        This makes frontend integration and monitoring much easier.
+        """
+        try:
+            # Best-effort: bar index is incremented in runner; 1 bar ~= 1 minute here.
+            bar_idx = int(getattr(self, "_bar_index", 0) or 0)
+            if bar_idx <= 0:
+                return
+            if (bar_idx % 5) != 0:
+                return
+
+            # Summary heartbeat
+            self.logger.log_info("[SUMMARY_5M] ------------------------------")
+            self._log_summary(ts=ts, current_price=current_price, portfolio_state=portfolio_state)
+
+            # Blotter heartbeat: last N events
+            tail_n = 10
+            tail = self._blotter_events[-tail_n:] if self._blotter_events else []
+            self.logger.log_info(
+                f"[BLOTTER_5M] ts={ts} events_total={len(self._blotter_events)} tail={len(tail)}"
+            )
+            if not tail:
+                self.logger.log_info("[BLOTTER_5M] (empty)")
+            else:
+                for e in tail[-5:]:
+                    self.logger.log_info(
+                        "[BLOTTER_5M] "
+                        f"{e.get('ts')} {e.get('side')} L{e.get('level')} "
+                        f"px={e.get('px')} qty={e.get('qty')} fee_est={e.get('fee_est')} "
+                        f"net_pos={e.get('net_pos')} unreal={e.get('unreal')}"
+                    )
+
+            # Also write a compact tail snapshot for the dashboard
+            base = Path(getattr(self.config, "state_dir", "state"))
+            base.mkdir(parents=True, exist_ok=True)
+            snap = {
+                "ts": pd.Timestamp(ts).tz_convert("UTC").isoformat(),
+                "symbol": str(self.symbol),
+                "mode": "dry_run" if bool(self.dry_run) else "live",
+                "summary": self._readable_summary_from_state(
+                    portfolio_state=portfolio_state,
+                    current_price=current_price,
+                    realized=float(getattr(self.algorithm.grid_manager, "realized_pnl", 0.0) or 0.0),
+                    avg_cost=self._get_avg_cost_from_ledger(),
+                    fees_est=float(self._paper_commission_paid) if bool(self.dry_run) else None,
+                ),
+                "blotter_tail": tail,
+            }
+            tmp = base / "report_5m.json.tmp"
+            out = base / "report_5m.json"
+            tmp.write_text(json.dumps(snap, ensure_ascii=False, indent=2), encoding="utf-8")
+            tmp.replace(out)
+        except Exception:
+            return
+    @staticmethod
+    def _readable_summary_from_state(
+        *,
+        portfolio_state: Dict[str, Any],
+        current_price: float,
+        realized: float,
+        avg_cost: float | None,
+        fees_est: float | None,
+    ) -> Dict[str, Any]:
+        """Helper for report json payload (pure-ish, no side effects)."""
+        equity = float(portfolio_state.get("equity", 0.0) or 0.0)
+        long_h = float(
+            portfolio_state.get("long_holdings", portfolio_state.get("holdings", 0.0)) or 0.0
+        )
+        short_h = float(portfolio_state.get("short_holdings", 0.0) or 0.0)
+        net = float(long_h) - float(short_h)
+        unreal = float(portfolio_state.get("unrealized_pnl", 0.0) or 0.0)
+        px = float(current_price)
+        gross_notional = (abs(float(long_h)) + abs(float(short_h))) * px
+        eff_lev = (gross_notional / equity) if equity > 0 else 0.0
+        return {
+            "current_price": px,
+            "net_position": net,
+            "avg_cost": avg_cost,
+            "unrealized_pnl": unreal,
+            "realized_pnl": float(realized),
+            "equity": equity,
+            "cash": float(portfolio_state.get("cash", 0.0) or 0.0),
+            "effective_leverage": eff_lev,
+            "fees_est": fees_est,
+        }
 
     def _get_portfolio_state(self, current_price: float) -> Dict[str, Any]:
         """
@@ -694,6 +919,50 @@ class BitgetLiveRunner:
         leg_tag = leg if leg is not None else "long"
         return f"{self._client_oid_prefix}{direction}_{int(level_index)}_{leg_tag}"
 
+    def _apply_active_buy_levels_filter(self, current_price: float, keep_levels: int) -> None:
+        """
+        Keep only the nearest `keep_levels` BUY pending orders (below current price) enabled.
+
+        IMPORTANT:
+        - This MUST be reversible (do NOT permanently remove orders).
+        - We flip order['placed'] flags each bar, matching `simple_lean_runner.py` behavior.
+        - This affects both:
+          (1) real exchange sync (which orders are placed/cancelled)
+          (2) dry-run fill simulation (which orders are eligible to trigger)
+        """
+        if keep_levels <= 0:
+            return
+        gm = self.algorithm.grid_manager
+        pending = gm.pending_limit_orders
+        if not pending:
+            return
+
+        buy_orders = [o for o in pending if str(o.get("direction")) == "buy" and o.get("leg") != "short_cover"]
+        if not buy_orders:
+            return
+
+        # Eligible BUY orders are those below/at current price (resting buy).
+        eligible = [o for o in buy_orders if float(o.get("price", 0.0)) <= float(current_price)]
+        if len(eligible) <= keep_levels:
+            # Enable all eligible, disable ineligible (above market)
+            for o in buy_orders:
+                o["placed"] = float(o.get("price", 0.0)) <= float(current_price)
+                if not o["placed"]:
+                    o["triggered"] = False
+            return
+
+        # Sort eligible by distance to current price (closest first), keep top N
+        eligible_sorted = sorted(eligible, key=lambda o: abs(float(current_price) - float(o.get("price", 0.0))))
+        keep_ids = {(o.get("direction"), int(o.get("level_index", -1)), o.get("leg")) for o in eligible_sorted[:keep_levels]}
+
+        # Enable kept orders; disable the rest (and clear triggered state)
+        for o in buy_orders:
+            oid = (o.get("direction"), int(o.get("level_index", -1)), o.get("leg"))
+            is_eligible = float(o.get("price", 0.0)) <= float(current_price)
+            o["placed"] = bool(is_eligible and oid in keep_ids)
+            if not o["placed"]:
+                o["triggered"] = False
+
     def _sync_exchange_orders(self, current_price: Optional[float], current_time: Optional[datetime] = None) -> None:
         """
         Sync algorithm.pending_limit_orders -> exchange open orders.
@@ -714,26 +983,11 @@ class BitgetLiveRunner:
 
         cp = float(current_price) if current_price is not None else None
 
-        # Apply active_buy_levels filter (matches backtest execution knobs)
+        # NOTE:
+        # active_buy_levels filter is applied in the main loop via `_apply_active_buy_levels_filter`
+        # to keep it reversible (backtest-consistent). Do NOT permanently flip placed flags here.
         pending = list(self.algorithm.grid_manager.pending_limit_orders)
         cp = float(current_price) if current_price is not None else None
-        if cp is not None and self.active_buy_levels is not None and self.active_buy_levels > 0:
-            keep_n = int(self.active_buy_levels)
-            if self._in_cooldown(datetime.now(timezone.utc)) and self.cooldown_active_buy_levels > 0:
-                keep_n = int(self.cooldown_active_buy_levels)
-
-            # Eligible BUY orders: price <= current_price (resting buy)
-            buys = [o for o in pending if str(o.get("direction")) == "buy" and bool(o.get("placed", False))]
-            eligible = [o for o in buys if float(o.get("price", 0.0)) <= float(cp)]
-            if len(eligible) > keep_n:
-                eligible_sorted = sorted(eligible, key=lambda o: abs(float(cp) - float(o.get("price", 0.0))))
-                keep_keys = {(int(o.get("level_index")), o.get("leg")) for o in eligible_sorted[:keep_n]}
-                # Remove extra eligible buys from desired set by marking placed=False
-                for o in pending:
-                    if str(o.get("direction")) == "buy" and bool(o.get("placed", False)):
-                        k = (int(o.get("level_index")), o.get("leg"))
-                        if float(o.get("price", 0.0)) <= float(cp) and k not in keep_keys:
-                            o["placed"] = False
 
         desired: Dict[str, dict] = {}
         for o in pending:
@@ -998,6 +1252,13 @@ class BitgetLiveRunner:
                         unrealized_pnl=portfolio_state["unrealized_pnl"],
                     )
 
+                    # Write monitoring snapshot (for dashboard)
+                    self._write_status_snapshot(
+                        bar_timestamp=bar_timestamp,
+                        latest_bar=latest_bar,
+                        portfolio_state=portfolio_state,
+                    )
+
                     # Process filled orders first
                     self._process_filled_orders()
 
@@ -1009,6 +1270,14 @@ class BitgetLiveRunner:
                         equity=float(portfolio_state.get("equity", self.config.initial_cash)),
                         close_px=float(latest_bar["close"]),
                     )
+
+                    # Execution-layer policy: active BUY levels filter (backtest-consistent, reversible)
+                    cp = float(latest_bar["close"])
+                    if self.active_buy_levels is not None and self.active_buy_levels > 0:
+                        keep_n = int(self.active_buy_levels)
+                        if self._in_cooldown(bar_timestamp) and self.cooldown_active_buy_levels > 0:
+                            keep_n = int(self.cooldown_active_buy_levels)
+                        self._apply_active_buy_levels_filter(current_price=cp, keep_levels=keep_n)
 
                     # Prepare bar data
                     bar_data = {
@@ -1098,6 +1367,7 @@ class BitgetLiveRunner:
                             if leg == "short_open" and direction == "sell":
                                 proceeds = qty * exec_px
                                 commission = proceeds * commission_rate
+                                self._paper_commission_paid += float(commission)
                                 equity_now = float(self._paper_cash) + (float(self._paper_long_holdings) * mkt_px) - (float(self._paper_short_holdings) * mkt_px)
                                 max_notional = equity_now * float(getattr(self.config, "leverage", 1.0))
                                 new_gross = (float(self._paper_long_holdings) * mkt_px) + ((float(self._paper_short_holdings) + qty) * mkt_px)
@@ -1114,6 +1384,7 @@ class BitgetLiveRunner:
                                 cover = min(qty, float(self._paper_short_holdings))
                                 cost = cover * exec_px
                                 commission = cost * commission_rate
+                                self._paper_commission_paid += float(commission)
                                 self._paper_cash -= cost + commission
                                 self._paper_short_holdings = max(0.0, float(self._paper_short_holdings) - cover)
                                 self._paper_total_short_entry_value = max(0.0, float(self._paper_total_short_entry_value) - cover * exec_px)
@@ -1121,6 +1392,7 @@ class BitgetLiveRunner:
                             elif direction == "buy":
                                 notional = qty * exec_px
                                 commission = notional * commission_rate
+                                self._paper_commission_paid += float(commission)
                                 equity_now = float(self._paper_cash) + (float(self._paper_long_holdings) * mkt_px) - (float(self._paper_short_holdings) * mkt_px)
                                 max_notional = equity_now * float(getattr(self.config, "leverage", 1.0))
                                 new_gross = ((float(self._paper_long_holdings) + qty) * mkt_px) + (float(self._paper_short_holdings) * mkt_px)
@@ -1137,6 +1409,7 @@ class BitgetLiveRunner:
                                     break
                                 proceeds = qty * exec_px
                                 commission = proceeds * commission_rate
+                                self._paper_commission_paid += float(commission)
                                 self._paper_cash += proceeds - commission
                                 self._paper_long_holdings = max(0.0, float(self._paper_long_holdings) - qty)
                                 match = self.algorithm.grid_manager.match_sell_order(
@@ -1159,11 +1432,33 @@ class BitgetLiveRunner:
                             }
                             self.algorithm.on_order_filled(filled_order)
                             fills_this_bar += 1
-                            self.logger.log_info(
-                                f"[DRY_RUN_FILL] {bar_timestamp} {direction.upper()} L{int(triggered['level_index'])+1} "
-                                f"@{exec_px:.2f} qty={qty:.6f} leg={leg or 'long'}"
-                            )
+                            # Recompute portfolio after this fill (for blotter/summary)
                             portfolio_state = self._get_portfolio_state(current_price=float(latest_bar["close"]))
+                            notional = float(qty) * float(exec_px)
+                            blotter_event = {
+                                "ts": pd.Timestamp(bar_timestamp).tz_convert("UTC").isoformat(),
+                                "symbol": str(self.symbol),
+                                "side": direction.upper(),
+                                "level": int(triggered["level_index"]) + 1,
+                                "px": float(exec_px),
+                                "qty": float(qty),
+                                "notional": float(notional),
+                                "fee_est": float(commission),
+                                "leg": leg or "long",
+                                "cash": float(portfolio_state.get("cash", 0.0) or 0.0),
+                                "net_pos": float(portfolio_state.get("holdings", 0.0) or 0.0),
+                                "unreal": float(portfolio_state.get("unrealized_pnl", 0.0) or 0.0),
+                            }
+                            self._append_blotter_event(blotter_event)
+                            self.logger.log_info(
+                                f"[BLOTTER] {bar_timestamp} {direction.upper()} L{int(triggered['level_index'])+1} "
+                                f"px={exec_px:.2f} qty={qty:.6f} notional={notional:.2f} "
+                                f"fee_est={commission:.4f} cash={float(portfolio_state.get('cash', 0.0)):.2f} "
+                                f"net_pos={float(portfolio_state.get('holdings', 0.0)):.6f} "
+                                f"unreal={float(portfolio_state.get('unrealized_pnl', 0.0)):+.2f}"
+                            )
+                            # Optional: a compact summary every fill
+                            self._log_summary(ts=bar_timestamp, current_price=float(latest_bar["close"]), portfolio_state=portfolio_state)
 
                     # If grid disabled, cancel all bot orders and skip placing
                     if not bool(self.algorithm.grid_manager.grid_enabled):
@@ -1247,6 +1542,13 @@ class BitgetLiveRunner:
                     self._sync_exchange_orders(
                         current_price=float(latest_bar["close"]),
                         current_time=bar_timestamp,
+                    )
+
+                    # Heartbeat report every 5 minutes (even if no fills)
+                    self._emit_periodic_reports(
+                        ts=bar_timestamp,
+                        current_price=float(latest_bar["close"]),
+                        portfolio_state=portfolio_state,
                     )
 
                     # Wait for next minute
