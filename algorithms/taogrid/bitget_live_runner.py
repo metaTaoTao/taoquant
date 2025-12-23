@@ -9,6 +9,7 @@ from __future__ import annotations
 import sys
 import time
 import json
+import math
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any
@@ -153,6 +154,10 @@ class BitgetLiveRunner:
         self.live_status_update_frequency = max(1, int(live_status_update_frequency))
         self._live_status_update_counter = 0
         self._start_time = datetime.now(timezone.utc)  # Track start time for uptime
+        # Market bars stream (JSONL) for dashboard-side market service
+        base = Path(getattr(self.config, "state_dir", "state"))
+        self._market_bars_file: Path = base / "market_bars_1m.jsonl"
+        self._last_market_bar_ts: datetime | None = None
 
         # Initialize strategy
         self._initialize_strategy()
@@ -1263,12 +1268,8 @@ class BitgetLiveRunner:
                         unrealized_pnl=portfolio_state["unrealized_pnl"],
                     )
 
-                    # Write monitoring snapshot (for dashboard)
-                    self._write_status_snapshot(
-                        bar_timestamp=bar_timestamp,
-                        latest_bar=latest_bar,
-                        portfolio_state=portfolio_state,
-                    )
+                    # Append 1m market bar (dashboard computes 24h stats from this stream)
+                    self._append_market_bar(bar_timestamp=bar_timestamp, latest_bar=latest_bar)
 
                     # Process filled orders first
                     self._process_filled_orders()
@@ -1592,181 +1593,323 @@ class BitgetLiveRunner:
     # Live Status Output Methods
     # ====================================================================
 
+    def _append_market_bar(self, *, bar_timestamp: datetime, latest_bar: dict) -> None:
+        """Append current 1m bar to JSONL stream (best-effort, non-blocking)."""
+        try:
+            ts = pd.Timestamp(bar_timestamp).tz_convert("UTC").to_pydatetime()
+            if self._last_market_bar_ts is not None and ts <= self._last_market_bar_ts:
+                return
+            self._last_market_bar_ts = ts
+
+            base = Path(getattr(self.config, "state_dir", "state"))
+            base.mkdir(parents=True, exist_ok=True)
+            path = self._market_bars_file
+            doc = {
+                "ts": pd.Timestamp(ts).tz_convert("UTC").isoformat(),
+                "symbol": str(self.symbol),
+                "open": float(latest_bar.get("open", 0.0) or 0.0),
+                "high": float(latest_bar.get("high", 0.0) or 0.0),
+                "low": float(latest_bar.get("low", 0.0) or 0.0),
+                "close": float(latest_bar.get("close", 0.0) or 0.0),
+                "volume": float(latest_bar.get("volume", 0.0) or 0.0),
+            }
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(doc, ensure_ascii=False) + "\n")
+        except Exception:
+            return
+
     def _atomic_write_json(self, filepath: Path, data: dict) -> None:
         """Atomically write JSON to file (temp + rename)."""
-        filepath.parent.mkdir(parents=True, exist_ok=True)
-        temp_file = filepath.with_suffix('.tmp')
-        with open(temp_file, 'w', encoding='utf-8') as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-        temp_file.replace(filepath)
+        try:
+            payload = self._sanitize_jsonable(data)
+            filepath.parent.mkdir(parents=True, exist_ok=True)
+            temp_file = filepath.with_suffix(".tmp")
+            with open(temp_file, "w", encoding="utf-8") as f:
+                # IMPORTANT: browser JSON.parse cannot handle NaN/Infinity.
+                json.dump(payload, f, ensure_ascii=False, indent=2, allow_nan=False)
+            temp_file.replace(filepath)
+        except Exception:
+            return
+
+    @staticmethod
+    def _sanitize_jsonable(obj: Any) -> Any:
+        """
+        Recursively sanitize objects to be strict-JSON compatible.
+
+        - Replace NaN/Infinity with None
+        - Convert numpy scalar via .item() when available
+        """
+        try:
+            # numpy scalar -> python scalar
+            if hasattr(obj, "item") and callable(getattr(obj, "item")):
+                obj = obj.item()
+        except Exception:
+            pass
+
+        if obj is None:
+            return None
+        if isinstance(obj, (str, int, bool)):
+            return obj
+        if isinstance(obj, float):
+            if math.isnan(obj) or math.isinf(obj):
+                return None
+            return obj
+        if isinstance(obj, dict):
+            return {str(k): BitgetLiveRunner._sanitize_jsonable(v) for k, v in obj.items()}
+        if isinstance(obj, (list, tuple)):
+            return [BitgetLiveRunner._sanitize_jsonable(v) for v in obj]
+        try:
+            return str(obj)
+        except Exception:
+            return None
 
     def _build_live_status_dict(self, current_bar: dict, timestamp: datetime) -> dict:
-        """Build complete live status dictionary for dashboard."""
-        # Get portfolio state
-        price = float(current_bar['close'])
+        """Build live_status.json payload (matches dashboard schema)."""
+        ts_iso = pd.Timestamp(timestamp).tz_convert("UTC").isoformat()
+        price = float(current_bar.get("close", 0.0) or 0.0)
         portfolio_state = self._get_portfolio_state(current_price=price)
 
-        # Calculate uptime
+        # Uptime
         uptime_seconds = int((timestamp - self._start_time).total_seconds())
 
-        # Extract key values
-        equity = float(portfolio_state.get('equity', self.config.initial_cash))
-        cash = float(portfolio_state.get('cash', self.config.initial_cash))
-        long_holdings = float(portfolio_state.get('long_holdings', 0.0))
-        short_holdings = float(portfolio_state.get('short_holdings', 0.0))
-        net_position_btc = long_holdings - short_holdings
-        total_cost_basis = float(portfolio_state.get('total_cost_basis', 0.0))
-        total_short_entry_value = float(portfolio_state.get('total_short_entry_value', 0.0))
+        equity = float(portfolio_state.get("equity", self.config.initial_cash) or self.config.initial_cash)
+        cash = float(portfolio_state.get("cash", self.config.initial_cash) or self.config.initial_cash)
+        long_holdings = float(portfolio_state.get("long_holdings", 0.0) or 0.0)
+        short_holdings = float(portfolio_state.get("short_holdings", 0.0) or 0.0)
+        net_position_btc = float(long_holdings) - float(short_holdings)
+        unrealized_pnl = float(portfolio_state.get("unrealized_pnl", 0.0) or 0.0)
 
-        # Get PnL from grid_manager and portfolio_state
-        unrealized_pnl = float(portfolio_state.get('unrealized_pnl', 0.0))
-        realized_pnl = float(getattr(self.algorithm.grid_manager, 'realized_pnl', 0.0) or 0.0)
-        total_pnl = equity - self.config.initial_cash
+        # Cost basis (for % metrics & avg cost)
+        if bool(self.dry_run):
+            total_cost_basis = float(self._paper_total_cost_basis)
+            total_short_entry_value = float(self._paper_total_short_entry_value)
+        else:
+            total_cost_basis = float(self._get_total_cost_basis_from_ledger())
+            total_short_entry_value = 0.0
+            for positions_by_level in self.algorithm.grid_manager.short_positions.values():
+                for pos in positions_by_level:
+                    try:
+                        sz = float(pos.get("size", 0.0))
+                        px = float(pos.get("sell_price", 0.0))
+                    except Exception:
+                        continue
+                    if sz > 0 and px > 0:
+                        total_short_entry_value += sz * px
 
-        # Position direction
-        if abs(net_position_btc) < 0.0001:
+        # Display realized PnL (dashboard definition): total_pnl - unrealized_pnl
+        total_pnl = equity - float(self.config.initial_cash)
+        realized_pnl = float(total_pnl) - float(unrealized_pnl)
+
+        # Daily PnL (placeholder; can be upgraded later)
+        daily_pnl = float(portfolio_state.get("daily_pnl", 0.0) or 0.0)
+        daily_pnl_pct = (daily_pnl / float(self.config.initial_cash)) if float(self.config.initial_cash) > 0 else 0.0
+
+        # Direction
+        if abs(net_position_btc) < 1e-8:
             direction = "FLAT"
         elif net_position_btc > 0:
             direction = "LONG"
         else:
             direction = "SHORT"
 
-        # Average cost - use ledger method for accuracy
-        avg_cost = self._get_avg_cost_from_ledger() or 0.0
+        # Avg cost (prefer ledger, fallback to cost_basis/holdings)
+        avg_cost = float(self._get_avg_cost_from_ledger() or 0.0)
+        if avg_cost <= 0 and long_holdings > 0 and total_cost_basis > 0:
+            avg_cost = float(total_cost_basis / long_holdings)
 
-        # Calculate 24h market data from recent bars
-        high_24h = price
-        low_24h = price
-        change_24h = 0.0
-        change_24h_pct = 0.0
-        if self._recent_bars is not None and len(self._recent_bars) >= 1440:
-            # 1440 minutes = 24 hours
-            recent_24h = self._recent_bars.tail(1440)
-            high_24h = float(recent_24h['high'].max())
-            low_24h = float(recent_24h['low'].min())
-            open_24h = float(recent_24h.iloc[0]['open'])
-            change_24h = price - open_24h
-            change_24h_pct = change_24h / open_24h if open_24h > 0 else 0.0
+        # Percent metrics
+        unrealized_pnl_pct = (unrealized_pnl / total_cost_basis) if total_cost_basis > 0 else 0.0
+        distance_to_cost_pct = ((price - avg_cost) / avg_cost) if avg_cost > 0 else 0.0
 
-        # Calculate inventory risk
-        # Inventory risk = abs(net_position_value) / equity
-        inventory_risk_pct = abs(net_position_btc * price) / equity if equity > 0 else 0.0
+        # Risk checks (match GridManager's capacity concept: equity * leverage)
+        gm = self.algorithm.grid_manager
+        risk_level = int(getattr(gm, "risk_level", 0) or 0)
+        grid_enabled = bool(getattr(gm, "grid_enabled", True))
+        shutdown_reason = getattr(gm, "grid_shutdown_reason", None)
 
-        # Build complete status dict
+        atr = float(getattr(gm, "current_atr", 0.0) or 0.0)
+        max_risk_atr_mult = float(getattr(self.config, "max_risk_atr_mult", 3.0) or 3.0)
+        price_depth_threshold = float(getattr(self.config, "support", 0.0) or 0.0) - max_risk_atr_mult * atr
+
+        max_loss_pct = float(getattr(self.config, "max_risk_loss_pct", 0.30) or 0.30)
+        # Profit buffer uses realized profits only (negative realized should not reduce safety margin)
+        profit_buffer_ratio = float(getattr(self.config, "profit_buffer_ratio", 0.5) or 0.5)
+        realized_for_buffer = max(0.0, float(getattr(gm, "realized_pnl", 0.0) or 0.0))
+        profit_buffer = realized_for_buffer * profit_buffer_ratio if bool(getattr(self.config, "enable_profit_buffer", True)) else 0.0
+        adjusted_loss_threshold = max(0.0, max_loss_pct - (profit_buffer / equity)) if equity > 0 else max_loss_pct
+
+        unrealized_loss_pct = max(0.0, (-unrealized_pnl / equity) if equity > 0 and unrealized_pnl < 0 else 0.0)
+        if unrealized_loss_pct >= adjusted_loss_threshold:
+            unrealized_loss_status = "CRITICAL"
+        elif unrealized_loss_pct >= adjusted_loss_threshold * 0.8:
+            unrealized_loss_status = "WARN"
+        else:
+            unrealized_loss_status = "OK"
+
+        leverage = float(getattr(self.config, "leverage", 1.0) or 1.0)
+        max_capacity = equity * leverage if equity > 0 else 1.0
+        inv_notional = abs(net_position_btc) * price
+        inventory_risk_pct = (inv_notional / max_capacity) if max_capacity > 0 else 0.0
+        inv_threshold = float(getattr(self.config, "max_risk_inventory_pct", 0.8) or 0.8)
+        if inventory_risk_pct >= inv_threshold:
+            inventory_status = "CRITICAL"
+        elif inventory_risk_pct >= inv_threshold * 0.8:
+            inventory_status = "WARN"
+        else:
+            inventory_status = "OK"
+
+        price_depth_status = "OK" if price >= price_depth_threshold else "WARN"
+
+        # Regime mapping (dashboard schema wants BULLISH/NEUTRAL/BEARISH)
+        regime_raw = str(getattr(self.config, "regime", "NEUTRAL") or "NEUTRAL")
+        if regime_raw.upper().startswith("BULL"):
+            regime = "BULLISH"
+        elif regime_raw.upper().startswith("BEAR"):
+            regime = "BEARISH"
+        else:
+            regime = "NEUTRAL"
+
+        # Orders: transform blotter events to dashboard schema
+        orders = []
+        for e in list(self._blotter_events[-100:])[::-1]:
+            try:
+                orders.append(
+                    {
+                        "id": e.get("id") or f"{e.get('ts')}:{e.get('side')}:{e.get('level')}",
+                        "timestamp": e.get("ts"),
+                        "direction": str(e.get("side", "")).lower(),
+                        "level": int(e.get("level", 0) or 0),
+                        "price": float(e.get("px", 0.0) or 0.0),
+                        "size": float(e.get("qty", 0.0) or 0.0),
+                        "notional": float(e.get("notional", 0.0) or 0.0),
+                        "commission": float(e.get("fee_est", 0.0) or 0.0),
+                        "slippage": 0.0,
+                        "order_id": e.get("order_id"),
+                        "execution_type": "DRY_RUN_FILL" if bool(self.dry_run) else "FILLED",
+                        "matched_trade": None,
+                        "factors": dict(self._last_factor_state or {}),
+                    }
+                )
+            except Exception:
+                continue
+
         return {
-            "ts": timestamp.isoformat(),
-            "mode": "dryrun" if self.dry_run else "live",
+            "ts": ts_iso,
+            "mode": "dryrun" if bool(self.dry_run) else "live",
             "portfolio": {
                 "equity": equity,
-                "initial_cash": self.config.initial_cash,
+                "initial_cash": float(self.config.initial_cash),
                 "realized_pnl": realized_pnl,
                 "unrealized_pnl": unrealized_pnl,
-                "total_pnl": total_pnl,
-                "total_pnl_pct": total_pnl / self.config.initial_cash if self.config.initial_cash > 0 else 0.0,
-                "daily_pnl": 0,  # TODO: Track daily PnL
-                "daily_pnl_pct": 0,  # TODO: Track daily PnL %
-                "peak_equity_today": equity,  # TODO: Track peak
-                "peak_equity_today_time": timestamp.isoformat(),
-                "total_trades": len(self._blotter_events),
-                "open_positions_count": 1 if abs(net_position_btc) >= 0.0001 else 0
+                "total_pnl": float(total_pnl),
+                "total_pnl_pct": (float(total_pnl) / float(self.config.initial_cash)) if float(self.config.initial_cash) > 0 else 0.0,
+                "daily_pnl": daily_pnl,
+                "daily_pnl_pct": daily_pnl_pct,
+                "peak_equity_today": equity,  # TODO: day tracking (future)
+                "peak_equity_today_time": ts_iso,
+                "total_trades": int(len(self._blotter_events)),
+                "open_positions_count": 1 if abs(net_position_btc) >= 1e-8 else 0,
             },
             "position": {
                 "net_position_btc": net_position_btc,
                 "direction": direction,
                 "position_value_usd": abs(net_position_btc) * price,
                 "avg_cost": avg_cost,
-                "breakeven_price": avg_cost,  # Simplified
+                "breakeven_price": avg_cost,  # TODO: include fees/funding in live
                 "unrealized_pnl": unrealized_pnl,
-                "unrealized_pnl_pct": (unrealized_pnl / total_cost_basis) if total_cost_basis > 0 else 0.0,
-                "distance_to_cost_pct": ((price - avg_cost) / avg_cost) if avg_cost > 0 else 0.0,
+                "unrealized_pnl_pct": float(unrealized_pnl_pct),
+                "distance_to_cost_pct": float(distance_to_cost_pct),
                 "long_holdings": long_holdings,
                 "short_holdings": short_holdings,
-                "cost_basis": total_cost_basis
+                "cost_basis": float(total_cost_basis),
+                "short_entry_value": float(total_short_entry_value),
             },
             "market": {
-                "symbol": self.symbol,
+                "symbol": str(self.symbol),
                 "exchange": "Bitget",
                 "close": price,
-                "open": float(current_bar.get('open', price)),
-                "high": float(current_bar.get('high', price)),
-                "low": float(current_bar.get('low', price)),
-                "volume": float(current_bar.get('volume', 0.0)),
-                "change_24h": change_24h,
-                "change_24h_pct": change_24h_pct,
-                "high_24h": high_24h,
-                "low_24h": low_24h,
-                "atr_14": 0,  # TODO: Calculate if needed
-                "spread": 0,
-                "timestamp": timestamp.isoformat(),
-                "data_latency_ms": 0
+                "open": float(current_bar.get("open", price) or price),
+                "high": float(current_bar.get("high", price) or price),
+                "low": float(current_bar.get("low", price) or price),
+                # Dashboard service will overwrite volume/change/high_24h/low_24h from market_bars_1m.jsonl
+                "volume": float(current_bar.get("volume", 0.0) or 0.0),
+                "change_24h": 0.0,
+                "change_24h_pct": 0.0,
+                "high_24h": price,
+                "low_24h": price,
+                "atr_14": atr,
+                "spread": 0.0,
+                "timestamp": ts_iso,
+                "data_latency_ms": 0.0,
             },
             "risk": {
-                "risk_level": 0,  # TODO: Implement risk level logic
-                "grid_enabled": True,
-                "shutdown_reason": None,
+                "risk_level": risk_level,
+                "grid_enabled": grid_enabled,
+                "shutdown_reason": shutdown_reason,
                 "checks": {
                     "price_depth": {
-                        "status": "OK",
+                        "status": price_depth_status,
                         "value": price,
-                        "threshold": self.config.support - 2.0 * 500  # Simplified
+                        "threshold": price_depth_threshold,
                     },
                     "unrealized_loss": {
-                        "status": "OK" if abs(unrealized_pnl / equity) < self.config.max_risk_loss_pct else "WARN",
-                        "value_pct": unrealized_pnl / equity if equity > 0 else 0.0,
-                        "threshold": self.config.max_risk_loss_pct,
-                        "adjusted_threshold": self.config.max_risk_loss_pct
+                        "status": unrealized_loss_status,
+                        "value_pct": unrealized_loss_pct,
+                        "threshold": max_loss_pct,
+                        "adjusted_threshold": adjusted_loss_threshold,
                     },
                     "inventory_risk": {
-                        "status": "OK" if inventory_risk_pct < self.config.max_risk_inventory_pct else "WARN",
+                        "status": inventory_status,
                         "value_pct": inventory_risk_pct,
-                        "threshold": self.config.max_risk_inventory_pct
-                    }
+                        "threshold": inv_threshold,
+                    },
                 },
-                "last_check_time": timestamp.isoformat()
+                "last_check_time": ts_iso,
             },
             "strategy": {
-                "name": f"TaoGrid {self.config.regime}",
-                "symbol": self.symbol,
+                "name": f"TaoGrid {regime_raw}",
+                "symbol": str(self.symbol),
                 "exchange": "Bitget",
-                "regime": self.config.regime,
-                "buy_weight": 0.70 if self.config.regime == "BULLISH_RANGE" else 0.50,
-                "sell_weight": 0.30 if self.config.regime == "BULLISH_RANGE" else 0.50,
-                "support": self.config.support,
-                "resistance": self.config.resistance,
-                "range_usd": self.config.resistance - self.config.support,
-                "range_pct": (self.config.resistance - self.config.support) / self.config.support,
-                "current_spacing_usd": 0,  # TODO: Calculate from grid
-                "current_spacing_pct": 0,
-                "grid_levels_total": 0,  # TODO: Get from grid_manager
-                "grid_levels_buy": 0,
-                "grid_levels_sell": 0,
-                "initial_cash": self.config.initial_cash,
-                "leverage": self.config.leverage,
-                "max_inventory_risk": self.config.max_risk_inventory_pct,
-                "max_unrealized_loss": self.config.max_risk_loss_pct,
-                "start_time": self._start_time.isoformat(),
-                "uptime_seconds": uptime_seconds
+                "regime": regime,
+                "buy_weight": float(getattr(gm, "regime_buy_ratio", 0.5) or 0.5),
+                "sell_weight": float(getattr(gm, "regime_sell_ratio", 0.5) or 0.5),
+                "support": float(getattr(self.config, "support", 0.0) or 0.0),
+                "resistance": float(getattr(self.config, "resistance", 0.0) or 0.0),
+                "range_usd": float(getattr(self.config, "resistance", 0.0) or 0.0) - float(getattr(self.config, "support", 0.0) or 0.0),
+                "range_pct": ((float(getattr(self.config, "resistance", 0.0) or 0.0) - float(getattr(self.config, "support", 1.0) or 1.0)) / float(getattr(self.config, "support", 1.0) or 1.0)),
+                "current_spacing_usd": 0.0,  # TODO: from grid spacing
+                "current_spacing_pct": 0.0,
+                "grid_levels_total": int(len(getattr(gm, "pending_limit_orders", []) or [])),
+                # NOTE: buy_levels/sell_levels are numpy arrays; don't use `or []` (ambiguous truth value)
+                "grid_levels_buy": int(len(getattr(gm, "buy_levels", None)) if getattr(gm, "buy_levels", None) is not None else 0),
+                "grid_levels_sell": int(len(getattr(gm, "sell_levels", None)) if getattr(gm, "sell_levels", None) is not None else 0),
+                "initial_cash": float(self.config.initial_cash),
+                "leverage": leverage,
+                "max_inventory_risk": inv_threshold,
+                "max_unrealized_loss": max_loss_pct,
+                "start_time": pd.Timestamp(self._start_time).tz_convert("UTC").isoformat(),
+                "uptime_seconds": uptime_seconds,
             },
-            "orders": [evt for evt in self._blotter_events[-100:]],  # Last 100 orders
-            "risk_log": [],  # TODO: Implement risk log
-            "performance": {},  # TODO: Calculate performance metrics
+            "orders": orders,
+            "risk_log": [],
+            "performance": {},
             "system": {
                 "bot_status": "RUNNING",
-                "last_heartbeat": timestamp.isoformat(),
+                "last_heartbeat": ts_iso,
                 "expected_bar_interval_seconds": 60,
                 "actual_last_bar_seconds_ago": 0,
                 "data_feed_status": "CONNECTED",
                 "data_feed_latency_ms": 0,
-                "data_feed_last_update": timestamp.isoformat(),
+                "data_feed_last_update": ts_iso,
                 "exchange_api_status": "CONNECTED",
                 "exchange_api_latency_ms": 0,
-                "exchange_api_last_order": None,  # TODO: Track last order time
+                "exchange_api_last_order": None,
                 "last_bar_processing_time_ms": 0,
                 "avg_bar_processing_time_ms": 0,
                 "peak_bar_processing_time_ms": 0,
                 "error_count_24h_critical": 0,
-                "error_count_24h_warning": 0
-            }
+                "error_count_24h_warning": 0,
+            },
         }
 
     def _update_live_status(self, current_bar: dict, timestamp: datetime) -> None:

@@ -12,6 +12,8 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, PlainTextResponse
 from fastapi.templating import Jinja2Templates
 
+from dashboard.services.market_data_service import enrich_status_with_market_24h
+
 
 def _env(name: str, default: str) -> str:
     v = os.getenv(name)
@@ -27,6 +29,7 @@ LOG_DIR = Path(_env("TAOQUANT_LOG_DIR", str(BASE_DIR / "logs" / "bitget_live")))
 SERVICE_NAME = _env("TAOQUANT_SERVICE_NAME", "taoquant.service")
 TOKEN = os.getenv("TAOQUANT_DASHBOARD_TOKEN")  # if set, all endpoints require Bearer token
 ENABLE_CONTROL = _env("TAOQUANT_ENABLE_CONTROL", "0").strip().lower() in ("1", "true", "yes")
+MARKET_BARS_FILE = Path(_env("TAOQUANT_MARKET_BARS_FILE", str(STATE_DIR / "market_bars_1m.jsonl"))).resolve()
 
 
 def _now_iso() -> str:
@@ -365,7 +368,19 @@ def api_status(request: Request) -> Dict[str, Any]:
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     CONFIG_VERSIONS_DIR.mkdir(parents=True, exist_ok=True)
     st = _read_json(STATUS_FILE)
-    return st or {"ts": _now_iso(), "note": "status file not found yet", "status_file": str(STATUS_FILE)}
+    if not st:
+        return {"ts": _now_iso(), "note": "status file not found yet", "status_file": str(STATUS_FILE)}
+
+    # Enrich market 24h stats in a clean service (runner only emits raw 1m bars).
+    try:
+        st = enrich_status_with_market_24h(
+            st,
+            bars_jsonl_path=MARKET_BARS_FILE,
+            now=datetime.now(timezone.utc),
+        )
+    except Exception:
+        pass
+    return st
 
 
 @app.get("/api/logs", response_class=PlainTextResponse)

@@ -357,7 +357,7 @@
         <div class="card">
             <div class="card-header">Unrealized PnL</div>
             <div class="card-value medium text-green" id="unrealized-pnl">+$7,198.35</div>
-            <div class="card-meta">3.0063 BTC open</div>
+            <div class="card-meta"><span id="open-btc">-</span> BTC open</div>
         </div>
 
         <!-- Daily PnL -->
@@ -548,6 +548,32 @@
             });
         }
 
+        // Apply green/red color based on sign
+        function setSignedColor(el, value) {
+            if (!el) return;
+            const v = Number(value || 0);
+            el.classList.toggle('text-green', v >= 0);
+            el.classList.toggle('text-red', v < 0);
+            el.classList.toggle('text-green-bright', false);
+            el.classList.toggle('text-red-bright', false);
+        }
+
+        // Apply arrow-up/down and green/red based on sign (for pct labels)
+        function setSignedArrow(el, value) {
+            if (!el) return;
+            const v = Number(value || 0);
+            el.classList.toggle('arrow-up', v >= 0);
+            el.classList.toggle('arrow-down', v < 0);
+            setSignedColor(el, v);
+        }
+
+        function formatSignedUSD(num, decimals = 2) {
+            if (num === null || num === undefined) return 'N/A';
+            const v = Number(num);
+            const sign = v >= 0 ? '+' : '-';
+            return sign + '$' + formatNumber(Math.abs(v), decimals);
+        }
+
         // Format percentage
         function formatPercent(num, decimals = 2) {
             if (num === null || num === undefined) return 'N/A';
@@ -582,10 +608,29 @@
                     const p = data.portfolio;
                     document.getElementById('equity').textContent = '$' + formatNumber(p.equity, 2);
                     document.getElementById('total-pnl').textContent = '$' + formatNumber(p.total_pnl, 2);
-                    document.getElementById('total-pnl-pct').textContent = formatPercent(p.total_pnl_pct, 2);
-                    document.getElementById('realized-pnl').textContent = '$' + formatNumber(p.realized_pnl, 2);
-                    document.getElementById('unrealized-pnl').textContent = '$' + formatNumber(p.unrealized_pnl, 2);
-                    document.getElementById('daily-pnl').textContent = '$' + formatNumber(p.daily_pnl, 2);
+                    const totalPnlPctEl = document.getElementById('total-pnl-pct');
+                    if (totalPnlPctEl) {
+                        totalPnlPctEl.textContent = formatPercent(p.total_pnl_pct, 2);
+                        setSignedArrow(totalPnlPctEl, p.total_pnl_pct);
+                    }
+
+                    const realizedEl = document.getElementById('realized-pnl');
+                    if (realizedEl) {
+                        realizedEl.textContent = formatSignedUSD(p.realized_pnl, 2);
+                        setSignedColor(realizedEl, p.realized_pnl);
+                    }
+
+                    const unrealEl = document.getElementById('unrealized-pnl');
+                    if (unrealEl) {
+                        unrealEl.textContent = formatSignedUSD(p.unrealized_pnl, 2);
+                        setSignedColor(unrealEl, p.unrealized_pnl);
+                    }
+
+                    const dailyEl = document.getElementById('daily-pnl');
+                    if (dailyEl) {
+                        dailyEl.textContent = formatSignedUSD(p.daily_pnl, 2);
+                        setSignedColor(dailyEl, p.daily_pnl);
+                    }
                     document.getElementById('total-trades').textContent = p.total_trades || 0;
                 }
 
@@ -596,8 +641,21 @@
                     document.getElementById('direction').textContent = pos.direction || 'FLAT';
                     document.getElementById('position-value').textContent = '$' + formatNumber(pos.position_value_usd, 2);
                     document.getElementById('avg-cost').textContent = '$' + formatNumber(pos.avg_cost, 2);
-                    document.getElementById('unrealized-pnl-pos').textContent = '$' + formatNumber(pos.unrealized_pnl, 2);
-                    document.getElementById('unrealized-pnl-pct').textContent = formatPercent(pos.unrealized_pnl_pct, 2);
+                    const upnlPosEl = document.getElementById('unrealized-pnl-pos');
+                    if (upnlPosEl) {
+                        upnlPosEl.textContent = formatSignedUSD(pos.unrealized_pnl, 2);
+                        setSignedColor(upnlPosEl, pos.unrealized_pnl);
+                    }
+                    const upnlPctEl = document.getElementById('unrealized-pnl-pct');
+                    if (upnlPctEl) {
+                        upnlPctEl.textContent = formatPercent(pos.unrealized_pnl_pct, 2);
+                        setSignedColor(upnlPctEl, pos.unrealized_pnl_pct);
+                    }
+
+                    // Update "BTC open" meta in the Unrealized PnL card (use absolute net position)
+                    const openBtc = Math.abs(Number(pos.net_position_btc || 0));
+                    const openEl = document.getElementById('open-btc');
+                    if (openEl) openEl.textContent = formatNumber(openBtc, 4);
                 }
 
                 // Update Market section
@@ -656,10 +714,10 @@
                                 <td>${new Date(order.timestamp).toISOString().substring(11, 19)}</td>
                                 <td><span class="badge ${order.direction === 'buy' ? 'badge-success' : 'badge-danger'}">${order.direction.toUpperCase()}</span></td>
                                 <td>L${String(order.level).padStart(2, '0')}</td>
-                                <td>$${formatNumber(order.price, 2)}</td>
-                                <td>${formatNumber(order.size, 4)}</td>
-                                <td>$${formatNumber(order.notional, 2)}</td>
-                                <td>${order.matched_trade ? '$' + formatNumber(order.matched_trade.pnl, 2) : '-'}</td>
+                                <td class="text-right">$${formatNumber(order.price, 2)}</td>
+                                <td class="text-right">${formatNumber(order.size, 6)}</td>
+                                <td class="text-right">$${formatNumber(order.notional, 2)}</td>
+                                <td class="text-right text-red">$${formatNumber(order.commission ?? 0, 4)}</td>
                             </tr>
                         `).join('');
                     }
