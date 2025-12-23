@@ -905,6 +905,15 @@
                 // Update current time
                 document.getElementById('current-time').textContent = formatTime(data.ts);
 
+                // Update mode badge
+                const modeEl = document.getElementById('mode');
+                if (modeEl) {
+                    const rawMode = String(data.mode || '').trim();
+                    const normMode = rawMode ? rawMode.replace(/_/g, '').toUpperCase() : 'UNKNOWN';
+                    const cls = (normMode === 'LIVE') ? 'text-green' : (normMode.startsWith('DRY') ? 'text-cyan' : 'text-orange');
+                    modeEl.innerHTML = `MODE: <span class="${cls}">${normMode}</span>`;
+                }
+
                 // Update Portfolio section
                 if (data.portfolio) {
                     const p = data.portfolio;
