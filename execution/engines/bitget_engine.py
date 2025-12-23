@@ -102,6 +102,16 @@ class BitgetExecutionEngine:
                 extra.setdefault("clientOid", str(client_order_id))
 
             amount = float(self.exchange.amount_to_precision(ccxt_symbol, quantity))
+            
+            # Check if amount meets minimum requirements
+            market = self.exchange.market(ccxt_symbol)
+            min_amount = market.get("limits", {}).get("amount", {}).get("min", 0)
+            if self.debug:
+                print(f"[Bitget CCXT Engine] amount_to_precision: {quantity} -> {amount}, min_amount={min_amount}")
+            if min_amount and amount < min_amount:
+                import sys
+                print(f"[Bitget place_order REJECTED] amount={amount} < min_amount={min_amount} for {ccxt_symbol}", file=sys.stderr)
+                return None
 
             if ccxt_type == "market":
                 if self.debug:
@@ -136,14 +146,15 @@ class BitgetExecutionEngine:
             self.pending_orders[order_id] = info
             return info
         except Exception as e:
-            # Always log order errors (critical for debugging live trading issues)
-            import logging
-            logging.getLogger(__name__).error(
+            # Always log order errors to stderr (critical for debugging live trading issues)
+            # This ensures it shows up in journalctl and console output
+            import sys
+            error_msg = (
                 f"[Bitget place_order FAILED] symbol={symbol} side={side} qty={quantity} price={price} "
-                f"client_oid={client_order_id} error={e}"
+                f"client_oid={client_order_id} error={type(e).__name__}: {e}"
             )
+            print(error_msg, file=sys.stderr)
             if self.debug:
-                print(f"[Bitget CCXT Engine] Error placing order: {e}")
                 import traceback
                 traceback.print_exc()
             return None
