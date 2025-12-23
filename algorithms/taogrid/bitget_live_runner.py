@@ -1495,9 +1495,10 @@ class BitgetLiveRunner:
         open_buy_levels = sorted(open_buy_levels)
         
         if desired_buy_levels != open_buy_levels:
+            cp_str = f"{cp:.2f}" if cp is not None else "NA"
             self.logger.log_info(
                 f"[SYNC_STATE] desired_buy_levels={desired_buy_levels} open_buy_levels={open_buy_levels} "
-                f"cp={cp:.2f if cp else 'NA'}"
+                f"cp={cp_str}"
             )
 
         # Cancel extra bot orders not in desired set
