@@ -1491,6 +1491,8 @@ class BitgetLiveRunner:
                     if self._safety_can_cancel(now=now_ts):
                         self.execution_engine.cancel_order(self.symbol, oid)
                         self._safety_mark_cancel()
+                        # Throttle API calls (Bitget limit: 10 req/s)
+                        time.sleep(0.12)
                     else:
                         self.logger.log_warning("[SAFETY] cancel rate limited; skip further cancels this minute.")
                         break
@@ -1515,6 +1517,8 @@ class BitgetLiveRunner:
                     if self._safety_can_cancel(now=now_ts):
                         self.execution_engine.cancel_order(self.symbol, oid)
                         self._safety_mark_cancel()
+                        # Throttle API calls (Bitget limit: 10 req/s)
+                        time.sleep(0.12)
                     else:
                         self.logger.log_warning("[SAFETY] cancel rate limited; skip replace cancels this minute.")
                         continue
@@ -1581,6 +1585,10 @@ class BitgetLiveRunner:
                     f"[ORDER_FAILED] {direction.upper()} L{level_index+1} @ ${price:.2f} "
                     f"qty={qty:.6f} - place_order returned None/empty"
                 )
+            
+            # Throttle API calls to stay under Bitget's 10 requests/second limit
+            # Use 120ms delay (~8 req/s) to leave headroom for other API calls
+            time.sleep(0.12)
 
     def run(self):
         """Main execution loop."""
