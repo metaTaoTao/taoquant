@@ -30,6 +30,7 @@
     "abnormal_buy_fills_trigger": 2,
     "abnormal_total_fills_trigger": 3,
     "abnormal_buy_notional_frac_equity": 0.03,
-    "abnormal_range_mult_spacing": 4
+    "abnormal_range_mult_spacing": 4,
+    "safety_max_notional_add_frac_equity_per_min": 1.5
   }
 }
