@@ -1487,6 +1487,10 @@ class BitgetLiveRunner:
                     params["reduceOnly"] = True
                 else:
                     params["reduceOnly"] = False
+                # Bitget swap: in unilateral(one-way) position mode, the exchange may require
+                # explicit tradeSide ("open"/"close") even if reduceOnly is provided.
+                # This keeps compatibility with both modes and avoids 40774 errors.
+                params.setdefault("tradeSide", "close" if bool(params.get("reduceOnly")) else "open")
 
             r = self.execution_engine.place_order(
                 symbol=self.symbol,
