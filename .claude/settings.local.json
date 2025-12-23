@@ -17,7 +17,9 @@
       "Bash(pkill:*)",
       "Bash(cat:*)",
       "Bash(tee:*)",
-      "Bash(dir:*)"
+      "Bash(dir:*)",
+      "Bash(timeout 5 python:*)",
+      "Bash(curl:*)"
     ],
     "deny": [],
     "ask": []

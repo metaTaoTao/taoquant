@@ -10,6 +10,7 @@ from typing import Any, Dict, Optional
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, PlainTextResponse
+from fastapi.templating import Jinja2Templates
 
 
 def _env(name: str, default: str) -> str:
@@ -147,10 +148,27 @@ def _tail_text(path: Path, n: int = 400) -> str:
 
 app = FastAPI(title="TaoQuant Dashboard", version="0.1.0")
 
+# Setup Jinja2 templates
+DASHBOARD_DIR = Path(__file__).resolve().parent
+templates = Jinja2Templates(directory=str(DASHBOARD_DIR / "templates"))
+
 
 @app.get("/", response_class=HTMLResponse)
-def home() -> str:
-    # ultra-simple dashboard (no build step). You can replace with React later.
+def home(request: Request):
+    """Serve the main dashboard page."""
+    # Load current status for initial render
+    st = _read_json(STATUS_FILE)
+    mode = _env("TAOQUANT_MODE", "dryrun").upper()
+
+    return templates.TemplateResponse("index.html", {
+        "request": request,
+        "mode": mode,
+        "status": st,
+    })
+
+@app.get("/legacy", response_class=HTMLResponse)
+def home_legacy() -> str:
+    # Legacy simple dashboard (kept for reference)
     if not ENABLE_CONTROL:
         # remove bot control card entirely in read-only mode
         return """

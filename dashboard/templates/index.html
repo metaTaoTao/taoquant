@@ -1,0 +1,699 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TaoQuant Live Trading Dashboard</title>
+    <style>
+        /* ==================== Color Palette ==================== */
+        :root {
+            --bg-primary: #0f1729;
+            --bg-card: #1a2332;
+            --bg-card-hover: #212b3d;
+            --border-color: #2d3748;
+            --border-highlight: #4a90e2;
+
+            --text-primary: #ffffff;
+            --text-secondary: #e5e7eb;
+            --text-muted: #9ca3af;
+            --text-dim: #6b7280;
+
+            --accent-cyan: #00d4ff;
+            --accent-blue: #4a90e2;
+            --success-green: #10b981;
+            --success-bright: #00ff88;
+            --warning-orange: #f59e0b;
+            --danger-red: #ef4444;
+            --danger-bright: #ff6b6b;
+
+            --font-mono: 'JetBrains Mono', 'Consolas', 'Monaco', 'Courier New', monospace;
+            --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+        }
+
+        /* ==================== Base Styles ==================== */
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: var(--font-sans);
+            background-color: var(--bg-primary);
+            color: var(--text-primary);
+            line-height: 1.6;
+            padding: 20px;
+            min-height: 100vh;
+        }
+
+        /* ==================== Header ==================== */
+        .header {
+            margin-bottom: 24px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding-bottom: 16px;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        .header h1 {
+            font-size: 24px;
+            font-weight: 600;
+            letter-spacing: -0.5px;
+        }
+
+        .header-meta {
+            font-family: var(--font-mono);
+            font-size: 13px;
+            color: var(--text-muted);
+        }
+
+        /* ==================== Grid Layout ==================== */
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 16px;
+            margin-bottom: 24px;
+        }
+
+        .grid-2 {
+            grid-template-columns: repeat(2, 1fr);
+        }
+
+        .grid-3 {
+            grid-template-columns: repeat(3, 1fr);
+        }
+
+        .grid-4 {
+            grid-template-columns: repeat(4, 1fr);
+        }
+
+        /* ==================== Card Component ==================== */
+        .card {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 16px;
+            transition: border-color 0.2s;
+        }
+
+        .card:hover {
+            background: var(--bg-card-hover);
+        }
+
+        .card-highlight {
+            border-color: var(--border-highlight);
+        }
+
+        .card-header {
+            font-size: 12px;
+            color: var(--text-dim);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 12px;
+            font-weight: 500;
+        }
+
+        .card-value {
+            font-family: var(--font-mono);
+            font-size: 32px;
+            font-weight: 700;
+            margin-bottom: 8px;
+            line-height: 1.2;
+        }
+
+        .card-value.large {
+            font-size: 40px;
+        }
+
+        .card-value.medium {
+            font-size: 28px;
+        }
+
+        .card-value.small {
+            font-size: 20px;
+        }
+
+        .card-meta {
+            font-family: var(--font-mono);
+            font-size: 13px;
+            color: var(--text-muted);
+        }
+
+        .card-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 6px 0;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        .card-row:last-child {
+            border-bottom: none;
+        }
+
+        .card-label {
+            font-size: 13px;
+            color: var(--text-muted);
+        }
+
+        .card-value-inline {
+            font-family: var(--font-mono);
+            font-size: 14px;
+            font-weight: 600;
+        }
+
+        /* ==================== Color Utilities ==================== */
+        .text-green { color: var(--success-green); }
+        .text-green-bright { color: var(--success-bright); }
+        .text-red { color: var(--danger-red); }
+        .text-red-bright { color: var(--danger-bright); }
+        .text-orange { color: var(--warning-orange); }
+        .text-cyan { color: var(--accent-cyan); }
+        .text-blue { color: var(--accent-blue); }
+        .text-muted { color: var(--text-muted); }
+        .text-dim { color: var(--text-dim); }
+
+        /* ==================== Badge Component ==================== */
+        .badge {
+            display: inline-block;
+            padding: 4px 10px;
+            border-radius: 4px;
+            font-size: 12px;
+            font-weight: 600;
+            font-family: var(--font-mono);
+            text-transform: uppercase;
+        }
+
+        .badge-success {
+            background: rgba(16, 185, 129, 0.15);
+            color: var(--success-green);
+            border: 1px solid var(--success-green);
+        }
+
+        .badge-danger {
+            background: rgba(239, 68, 68, 0.15);
+            color: var(--danger-red);
+            border: 1px solid var(--danger-red);
+        }
+
+        .badge-warning {
+            background: rgba(245, 158, 11, 0.15);
+            color: var(--warning-orange);
+            border: 1px solid var(--warning-orange);
+        }
+
+        .badge-info {
+            background: rgba(74, 144, 226, 0.15);
+            color: var(--accent-blue);
+            border: 1px solid var(--accent-blue);
+        }
+
+        /* ==================== Table Component ==================== */
+        .table-container {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            overflow: hidden;
+            margin-bottom: 24px;
+        }
+
+        .table-header {
+            padding: 16px;
+            border-bottom: 1px solid var(--border-color);
+            font-size: 14px;
+            font-weight: 600;
+            color: var(--text-secondary);
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-family: var(--font-mono);
+            font-size: 13px;
+        }
+
+        thead {
+            background: rgba(74, 144, 226, 0.05);
+            border-bottom: 1px solid var(--border-highlight);
+        }
+
+        th {
+            padding: 12px 16px;
+            text-align: left;
+            font-weight: 600;
+            color: var(--text-muted);
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        th.text-right { text-align: right; }
+
+        td {
+            padding: 12px 16px;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        td.text-right { text-align: right; }
+
+        tbody tr:hover {
+            background: var(--bg-card-hover);
+        }
+
+        tbody tr:last-child td {
+            border-bottom: none;
+        }
+
+        /* ==================== Arrow Indicators ==================== */
+        .arrow-up::before {
+            content: '▲ ';
+            color: var(--success-green);
+        }
+
+        .arrow-down::before {
+            content: '▼ ';
+            color: var(--danger-red);
+        }
+
+        /* ==================== Status Indicators ==================== */
+        .status-dot {
+            display: inline-block;
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            margin-right: 6px;
+        }
+
+        .status-dot.green { background: var(--success-green); }
+        .status-dot.red { background: var(--danger-red); }
+        .status-dot.orange { background: var(--warning-orange); }
+        .status-dot.gray { background: var(--text-dim); }
+
+        /* ==================== Section Headers ==================== */
+        .section-header {
+            font-size: 16px;
+            font-weight: 600;
+            color: var(--text-secondary);
+            margin: 32px 0 16px 0;
+            padding-bottom: 8px;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        /* ==================== Loading State ==================== */
+        .loading {
+            color: var(--text-dim);
+            font-style: italic;
+        }
+
+        /* ==================== Responsive ==================== */
+        @media (max-width: 1024px) {
+            .grid-4 { grid-template-columns: repeat(2, 1fr); }
+            .grid-3 { grid-template-columns: repeat(2, 1fr); }
+        }
+
+        @media (max-width: 640px) {
+            .grid,
+            .grid-2,
+            .grid-3,
+            .grid-4 {
+                grid-template-columns: 1fr;
+            }
+
+            .card-value { font-size: 24px; }
+            .header { flex-direction: column; align-items: flex-start; }
+        }
+    </style>
+</head>
+<body>
+    <!-- Header -->
+    <div class="header">
+        <h1>TaoQuant Live Trading Dashboard</h1>
+        <div class="header-meta">
+            <span id="mode">MODE: <span class="text-cyan">DRYRUN</span></span> |
+            <span id="current-time">2025-12-23 04:37:00 UTC</span>
+        </div>
+    </div>
+
+    <!-- Top Metrics Grid -->
+    <div class="grid grid-4">
+        <!-- Portfolio Summary -->
+        <div class="card card-highlight">
+            <div class="card-header">Current Equity</div>
+            <div class="card-value large" id="equity">$125,432.56</div>
+            <div class="card-meta">
+                <span class="text-green arrow-up" id="total-pnl-pct">+25.43%</span> Total: <span id="total-pnl">$25,432</span>
+            </div>
+        </div>
+
+        <!-- Realized PnL -->
+        <div class="card">
+            <div class="card-header">Realized PnL</div>
+            <div class="card-value medium text-green" id="realized-pnl">+$18,234.21</div>
+            <div class="card-meta"><span id="total-trades">73</span> trades</div>
+        </div>
+
+        <!-- Unrealized PnL -->
+        <div class="card">
+            <div class="card-header">Unrealized PnL</div>
+            <div class="card-value medium text-green" id="unrealized-pnl">+$7,198.35</div>
+            <div class="card-meta">3.0063 BTC open</div>
+        </div>
+
+        <!-- Daily PnL -->
+        <div class="card">
+            <div class="card-header">Daily PnL</div>
+            <div class="card-value medium text-green" id="daily-pnl">+$1,234.56</div>
+            <div class="card-meta">
+                <span class="text-green arrow-up">+0.98%</span> today
+            </div>
+        </div>
+    </div>
+
+    <!-- Position & Market Grid -->
+    <div class="grid grid-3">
+        <!-- Position Summary -->
+        <div class="card">
+            <div class="card-header">Position Summary</div>
+            <div class="card-row">
+                <span class="card-label">Net Position</span>
+                <span class="card-value-inline text-cyan" id="net-position">3.0063 BTC</span>
+            </div>
+            <div class="card-row">
+                <span class="card-label">Direction</span>
+                <span class="card-value-inline" id="direction">LONG</span>
+            </div>
+            <div class="card-row">
+                <span class="card-label">Position Value</span>
+                <span class="card-value-inline" id="position-value">$189,234</span>
+            </div>
+            <div class="card-row">
+                <span class="card-label">Average Cost</span>
+                <span class="card-value-inline" id="avg-cost">$60,123.45</span>
+            </div>
+            <div class="card-row">
+                <span class="card-label">Unrealized PnL</span>
+                <span class="card-value-inline text-green"><span id="unrealized-pnl-pos">$7,198</span> (<span id="unrealized-pnl-pct">+3.95%</span>)</span>
+            </div>
+        </div>
+
+        <!-- Market Data -->
+        <div class="card">
+            <div class="card-header">Market Data</div>
+            <div class="card-row">
+                <span class="card-label" id="symbol">BTCUSDT</span>
+                <span class="card-value-inline text-cyan" id="current-price">$62,987.00</span>
+            </div>
+            <div class="card-row">
+                <span class="card-label">24h Change</span>
+                <span class="card-value-inline text-green" id="24h-change">+3.87%</span>
+            </div>
+            <div class="card-row">
+                <span class="card-label">24h High / Low</span>
+                <span class="card-value-inline"><span id="24h-high">$63,457</span> / <span id="24h-low">$59,123</span></span>
+            </div>
+            <div class="card-row">
+                <span class="card-label">Volume</span>
+                <span class="card-value-inline" id="volume">12,345,678</span>
+            </div>
+        </div>
+
+        <!-- Risk Control -->
+        <div class="card card-highlight">
+            <div class="card-header">Risk Control</div>
+            <div class="card-row">
+                <span class="card-label">Risk Level</span>
+                <span class="badge badge-warning" id="risk-level">LEVEL 2</span>
+            </div>
+            <div class="card-row">
+                <span class="card-label">Grid Status</span>
+                <span class="badge badge-success" id="grid-status">ENABLED</span>
+            </div>
+            <div class="card-row">
+                <span class="card-label">Unrealized Loss</span>
+                <span class="card-value-inline text-green"><span id="unrealized-loss-check">7.2%</span> / <span id="unrealized-loss-threshold">30.0%</span></span>
+            </div>
+            <div class="card-row">
+                <span class="card-label">Inventory Risk</span>
+                <span class="card-value-inline"><span id="inventory-risk-check">45.6%</span> / <span id="inventory-threshold">80.0%</span></span>
+            </div>
+        </div>
+    </div>
+
+    <!-- Strategy Config -->
+    <div class="card">
+        <div class="card-header">Strategy Configuration</div>
+        <div class="grid grid-4" style="gap: 12px; margin-top: 12px;">
+            <div>
+                <div class="card-label">Strategy</div>
+                <div class="card-value-inline text-cyan" id="strategy-name">TaoGrid BULLISH</div>
+            </div>
+            <div>
+                <div class="card-label">Support / Resistance</div>
+                <div class="card-value-inline"><span id="support">$56,000</span> / <span id="resistance">$72,000</span></div>
+            </div>
+            <div>
+                <div class="card-label">Regime / Leverage</div>
+                <div class="card-value-inline"><span id="regime">BULLISH</span> / <span id="leverage">5x</span></div>
+            </div>
+            <div>
+                <div class="card-label">Running Time</div>
+                <div class="card-value-inline" id="uptime">7h 23m</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Order Blotter -->
+    <h2 class="section-header">Order Blotter</h2>
+    <div class="table-container">
+        <table>
+            <thead>
+                <tr>
+                    <th>Time</th>
+                    <th>Dir</th>
+                    <th>Level</th>
+                    <th class="text-right">Price</th>
+                    <th class="text-right">Size</th>
+                    <th class="text-right">Notional</th>
+                    <th class="text-right">Fee</th>
+                </tr>
+            </thead>
+            <tbody id="order-blotter">
+                <tr>
+                    <td>15:23:45</td>
+                    <td><span class="text-red">SELL</span></td>
+                    <td>L12</td>
+                    <td class="text-right">$63,234.56</td>
+                    <td class="text-right">0.0823</td>
+                    <td class="text-right">$5,204.21</td>
+                    <td class="text-right text-red">$5.20</td>
+                </tr>
+                <tr>
+                    <td>15:18:32</td>
+                    <td><span class="text-green">BUY</span></td>
+                    <td>L08</td>
+                    <td class="text-right">$62,123.45</td>
+                    <td class="text-right">0.0823</td>
+                    <td class="text-right">$5,112.76</td>
+                    <td class="text-right text-red">$5.11</td>
+                </tr>
+                <tr>
+                    <td colspan="7" class="loading">Loading more orders...</td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+
+    <!-- Risk Control Log -->
+    <h2 class="section-header">Risk Control Log</h2>
+    <div class="table-container">
+        <table>
+            <thead>
+                <tr>
+                    <th>Time</th>
+                    <th>Event</th>
+                    <th>Details</th>
+                </tr>
+            </thead>
+            <tbody id="risk-log">
+                <tr>
+                    <td>15:23:45</td>
+                    <td><span class="badge badge-warning">RISK_LEVEL_UP</span></td>
+                    <td>Level 1 → 2 (unrealized loss 7.2%)</td>
+                </tr>
+                <tr>
+                    <td>15:18:32</td>
+                    <td><span class="badge badge-success">ORDER_ALLOWED</span></td>
+                    <td>BUY L08 @ $62,123.45 (risk OK)</td>
+                </tr>
+                <tr>
+                    <td>15:12:18</td>
+                    <td><span class="badge badge-danger">ORDER_BLOCKED</span></td>
+                    <td>BUY L06 @ $61,456.78 (inventory risk 78.5%)</td>
+                </tr>
+                <tr>
+                    <td colspan="3" class="loading">Loading more events...</td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+
+    <script>
+        // Format number with commas
+        function formatNumber(num, decimals = 2) {
+            if (num === null || num === undefined) return 'N/A';
+            return Number(num).toLocaleString('en-US', {
+                minimumFractionDigits: decimals,
+                maximumFractionDigits: decimals
+            });
+        }
+
+        // Format percentage
+        function formatPercent(num, decimals = 2) {
+            if (num === null || num === undefined) return 'N/A';
+            return (num * 100).toFixed(decimals) + '%';
+        }
+
+        // Format timestamp
+        function formatTime(timestamp) {
+            if (!timestamp) return 'N/A';
+            return new Date(timestamp).toISOString().replace('T', ' ').substring(0, 19) + ' UTC';
+        }
+
+        // Get badge class based on value
+        function getBadgeClass(value, thresholds = {}) {
+            if (value === 'RUNNING' || value === 'OK' || value === 'CONNECTED') return 'badge-success';
+            if (value === 'WARN' || value === 'WARNING') return 'badge-warning';
+            if (value === 'ERROR' || value === 'CRITICAL' || value === 'BLOCKED') return 'badge-danger';
+            return 'badge-info';
+        }
+
+        // Update all dashboard data
+        async function updateDashboard() {
+            try {
+                const response = await fetch('/api/status');
+                const data = await response.json();
+
+                // Update current time
+                document.getElementById('current-time').textContent = formatTime(data.ts);
+
+                // Update Portfolio section
+                if (data.portfolio) {
+                    const p = data.portfolio;
+                    document.getElementById('equity').textContent = '$' + formatNumber(p.equity, 2);
+                    document.getElementById('total-pnl').textContent = '$' + formatNumber(p.total_pnl, 2);
+                    document.getElementById('total-pnl-pct').textContent = formatPercent(p.total_pnl_pct, 2);
+                    document.getElementById('realized-pnl').textContent = '$' + formatNumber(p.realized_pnl, 2);
+                    document.getElementById('unrealized-pnl').textContent = '$' + formatNumber(p.unrealized_pnl, 2);
+                    document.getElementById('daily-pnl').textContent = '$' + formatNumber(p.daily_pnl, 2);
+                    document.getElementById('total-trades').textContent = p.total_trades || 0;
+                }
+
+                // Update Position section
+                if (data.position) {
+                    const pos = data.position;
+                    document.getElementById('net-position').textContent = formatNumber(pos.net_position_btc, 4) + ' BTC';
+                    document.getElementById('direction').textContent = pos.direction || 'FLAT';
+                    document.getElementById('position-value').textContent = '$' + formatNumber(pos.position_value_usd, 2);
+                    document.getElementById('avg-cost').textContent = '$' + formatNumber(pos.avg_cost, 2);
+                    document.getElementById('unrealized-pnl-pos').textContent = '$' + formatNumber(pos.unrealized_pnl, 2);
+                    document.getElementById('unrealized-pnl-pct').textContent = formatPercent(pos.unrealized_pnl_pct, 2);
+                }
+
+                // Update Market section
+                if (data.market) {
+                    const m = data.market;
+                    document.getElementById('symbol').textContent = m.symbol || 'N/A';
+                    document.getElementById('current-price').textContent = '$' + formatNumber(m.close, 2);
+                    document.getElementById('24h-change').textContent = formatPercent(m.change_24h_pct, 2);
+                    document.getElementById('24h-high').textContent = '$' + formatNumber(m.high_24h, 2);
+                    document.getElementById('24h-low').textContent = '$' + formatNumber(m.low_24h, 2);
+                    document.getElementById('volume').textContent = formatNumber(m.volume, 2);
+                }
+
+                // Update Risk section
+                if (data.risk) {
+                    const r = data.risk;
+                    document.getElementById('risk-level').textContent = r.risk_level !== undefined ? r.risk_level : 'N/A';
+                    document.getElementById('grid-status').textContent = r.grid_enabled ? 'ENABLED' : 'DISABLED';
+
+                    if (r.checks) {
+                        if (r.checks.unrealized_loss) {
+                            document.getElementById('unrealized-loss-check').textContent = formatPercent(r.checks.unrealized_loss.value_pct, 2);
+                            document.getElementById('unrealized-loss-threshold').textContent = formatPercent(r.checks.unrealized_loss.threshold, 2);
+                        }
+                        if (r.checks.inventory_risk) {
+                            document.getElementById('inventory-risk-check').textContent = formatPercent(r.checks.inventory_risk.value_pct, 2);
+                            document.getElementById('inventory-threshold').textContent = formatPercent(r.checks.inventory_risk.threshold, 2);
+                        }
+                    }
+                }
+
+                // Update Strategy section
+                if (data.strategy) {
+                    const s = data.strategy;
+                    document.getElementById('strategy-name').textContent = s.name || 'N/A';
+                    document.getElementById('regime').textContent = s.regime || 'N/A';
+                    document.getElementById('support').textContent = '$' + formatNumber(s.support, 0);
+                    document.getElementById('resistance').textContent = '$' + formatNumber(s.resistance, 0);
+                    document.getElementById('leverage').textContent = s.leverage ? s.leverage + 'x' : 'N/A';
+
+                    if (s.start_time) {
+                        const uptimeHours = Math.floor((s.uptime_seconds || 0) / 3600);
+                        const uptimeMins = Math.floor(((s.uptime_seconds || 0) % 3600) / 60);
+                        document.getElementById('uptime').textContent = `${uptimeHours}h ${uptimeMins}m`;
+                    }
+                }
+
+                // Update Order Blotter
+                if (data.orders && Array.isArray(data.orders)) {
+                    const tbody = document.getElementById('order-blotter');
+                    if (data.orders.length === 0) {
+                        tbody.innerHTML = '<tr><td colspan="7" class="loading">No orders yet</td></tr>';
+                    } else {
+                        tbody.innerHTML = data.orders.slice(0, 20).map(order => `
+                            <tr>
+                                <td>${new Date(order.timestamp).toISOString().substring(11, 19)}</td>
+                                <td><span class="badge ${order.direction === 'buy' ? 'badge-success' : 'badge-danger'}">${order.direction.toUpperCase()}</span></td>
+                                <td>L${String(order.level).padStart(2, '0')}</td>
+                                <td>$${formatNumber(order.price, 2)}</td>
+                                <td>${formatNumber(order.size, 4)}</td>
+                                <td>$${formatNumber(order.notional, 2)}</td>
+                                <td>${order.matched_trade ? '$' + formatNumber(order.matched_trade.pnl, 2) : '-'}</td>
+                            </tr>
+                        `).join('');
+                    }
+                }
+
+                // Update Risk Log
+                if (data.risk_log && Array.isArray(data.risk_log)) {
+                    const tbody = document.getElementById('risk-log');
+                    if (data.risk_log.length === 0) {
+                        tbody.innerHTML = '<tr><td colspan="3" class="loading">No risk events yet</td></tr>';
+                    } else {
+                        tbody.innerHTML = data.risk_log.slice(0, 20).map(log => {
+                            const badgeClass = getBadgeClass(log.severity);
+                            return `
+                            <tr>
+                                <td>${new Date(log.timestamp).toISOString().substring(11, 19)}</td>
+                                <td><span class="badge ${badgeClass}">${log.event_type}</span></td>
+                                <td>${log.details || log.reason}</td>
+                            </tr>
+                        `}).join('');
+                    }
+                }
+
+                console.log('Dashboard updated:', new Date().toISOString());
+            } catch (error) {
+                console.error('Failed to update dashboard:', error);
+            }
+        }
+
+        // Initial load
+        updateDashboard();
+
+        // Auto-refresh every 5 seconds
+        setInterval(updateDashboard, 5000);
+    </script>
+</body>
+</html>

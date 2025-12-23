@@ -146,6 +146,11 @@ Examples:
   # With config file
   python run_bitget_live.py --symbol BTCUSDT --config-file config.json \\
       --api-key YOUR_KEY --api-secret YOUR_SECRET --passphrase YOUR_PASSPHRASE
+
+  # With dashboard monitoring (outputs to state/live_status.json)
+  python run_bitget_live.py --symbol BTCUSDT --dry-run --enable-dashboard \\
+      --config-file config.json \\
+      --api-key YOUR_KEY --api-secret YOUR_SECRET --passphrase YOUR_PASSPHRASE
         """,
     )
 
@@ -198,6 +203,26 @@ Examples:
         "--log-dir",
         default="logs/bitget_live",
         help="Log directory (default: logs/bitget_live)",
+    )
+
+    # Dashboard / Live Status arguments
+    parser.add_argument(
+        "--enable-dashboard",
+        action="store_true",
+        help="Enable live status output for dashboard monitoring",
+    )
+
+    parser.add_argument(
+        "--status-file",
+        default="state/live_status.json",
+        help="Path to live status JSON file (default: state/live_status.json)",
+    )
+
+    parser.add_argument(
+        "--status-update-frequency",
+        type=int,
+        default=1,
+        help="Update status every N bars (default: 1 = every bar)",
     )
 
     args = parser.parse_args()
@@ -254,7 +279,17 @@ Examples:
             dry_run=args.dry_run,
             log_dir=args.log_dir,
             execution_model=execution_model,
+            # Dashboard / Live Status
+            enable_live_status=args.enable_dashboard,
+            live_status_file=Path(args.status_file) if args.enable_dashboard else None,
+            live_status_update_frequency=args.status_update_frequency,
         )
+
+        if args.enable_dashboard:
+            print(f"📊 Dashboard enabled - status file: {args.status_file}")
+            print(f"   Update frequency: every {args.status_update_frequency} bar(s)")
+            print(f"   Visit: http://127.0.0.1:8000")
+            print()
 
         # Run
         runner.run()

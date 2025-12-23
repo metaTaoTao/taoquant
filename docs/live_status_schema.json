@@ -1,0 +1,306 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "TaoQuant Live Status Schema",
+  "description": "实时状态数据结构，支持dryrun/live双模式",
+  "type": "object",
+  "properties": {
+    "ts": {
+      "type": "string",
+      "format": "date-time",
+      "description": "当前时间戳 (ISO 8601 UTC)"
+    },
+    "mode": {
+      "type": "string",
+      "enum": ["dryrun", "live"],
+      "description": "运行模式"
+    },
+    "portfolio": {
+      "type": "object",
+      "description": "组合概况",
+      "properties": {
+        "equity": {"type": "number", "description": "当前权益 (USD)"},
+        "initial_cash": {"type": "number", "description": "初始资金 (USD)"},
+        "realized_pnl": {"type": "number", "description": "已实现盈亏 (USD)"},
+        "unrealized_pnl": {"type": "number", "description": "未实现盈亏 (USD)"},
+        "total_pnl": {"type": "number", "description": "总盈亏 (USD)"},
+        "total_pnl_pct": {"type": "number", "description": "总回报率"},
+        "daily_pnl": {"type": "number", "description": "今日盈亏 (USD)"},
+        "daily_pnl_pct": {"type": "number", "description": "今日回报率"},
+        "peak_equity_today": {"type": "number", "description": "今日最高权益"},
+        "peak_equity_today_time": {"type": "string", "format": "date-time"},
+        "total_trades": {"type": "integer", "description": "总交易次数"},
+        "open_positions_count": {"type": "integer", "description": "未平仓数量"}
+      },
+      "required": ["equity", "initial_cash", "realized_pnl", "unrealized_pnl", "total_pnl"]
+    },
+    "position": {
+      "type": "object",
+      "description": "持仓概况",
+      "properties": {
+        "net_position_btc": {"type": "number", "description": "净持仓 (BTC)"},
+        "direction": {"type": "string", "enum": ["LONG", "SHORT", "FLAT"], "description": "持仓方向"},
+        "position_value_usd": {"type": "number", "description": "持仓价值 (USD)"},
+        "avg_cost": {"type": "number", "description": "平均成本"},
+        "breakeven_price": {"type": "number", "description": "盈亏平衡价"},
+        "unrealized_pnl": {"type": "number", "description": "未实现盈亏 (USD)"},
+        "unrealized_pnl_pct": {"type": "number", "description": "未实现盈亏百分比"},
+        "distance_to_cost_pct": {"type": "number", "description": "距离成本距离百分比"},
+        "long_holdings": {"type": "number", "description": "多头持仓 (BTC)"},
+        "short_holdings": {"type": "number", "description": "空头持仓 (BTC)"},
+        "cost_basis": {"type": "number", "description": "成本基础 (USD)"}
+      },
+      "required": ["net_position_btc", "direction", "avg_cost", "unrealized_pnl"]
+    },
+    "market": {
+      "type": "object",
+      "description": "市场数据",
+      "properties": {
+        "symbol": {"type": "string", "description": "交易对"},
+        "exchange": {"type": "string", "description": "交易所"},
+        "close": {"type": "number", "description": "当前价格"},
+        "open": {"type": "number"},
+        "high": {"type": "number"},
+        "low": {"type": "number"},
+        "volume": {"type": "number"},
+        "change_24h": {"type": "number", "description": "24h价格变化 (USD)"},
+        "change_24h_pct": {"type": "number", "description": "24h涨跌幅"},
+        "high_24h": {"type": "number"},
+        "low_24h": {"type": "number"},
+        "atr_14": {"type": "number", "description": "ATR(14)"},
+        "spread": {"type": "number", "description": "买卖价差"},
+        "timestamp": {"type": "string", "format": "date-time"},
+        "data_latency_ms": {"type": "number", "description": "数据延迟 (毫秒)"}
+      },
+      "required": ["symbol", "close", "timestamp"]
+    },
+    "risk": {
+      "type": "object",
+      "description": "风控状态",
+      "properties": {
+        "risk_level": {"type": "integer", "minimum": 0, "maximum": 4, "description": "风险等级 (0-4)"},
+        "grid_enabled": {"type": "boolean", "description": "网格是否启用"},
+        "shutdown_reason": {"type": ["string", "null"], "description": "关闭原因"},
+        "checks": {
+          "type": "object",
+          "description": "风控检查结果",
+          "properties": {
+            "price_depth": {
+              "type": "object",
+              "properties": {
+                "status": {"type": "string", "enum": ["OK", "WARN", "CRITICAL"]},
+                "value": {"type": "number", "description": "当前价格"},
+                "threshold": {"type": "number", "description": "阈值价格 (S-3×ATR)"}
+              }
+            },
+            "unrealized_loss": {
+              "type": "object",
+              "properties": {
+                "status": {"type": "string", "enum": ["OK", "WARN", "CRITICAL"]},
+                "value_pct": {"type": "number", "description": "未实现亏损百分比"},
+                "threshold": {"type": "number", "description": "基础阈值 (30%)"},
+                "adjusted_threshold": {"type": "number", "description": "调整后阈值（含profit buffer）"}
+              }
+            },
+            "inventory_risk": {
+              "type": "object",
+              "properties": {
+                "status": {"type": "string", "enum": ["OK", "WARN", "CRITICAL"]},
+                "value_pct": {"type": "number", "description": "库存风险百分比"},
+                "threshold": {"type": "number", "description": "阈值 (80%)"}
+              }
+            }
+          }
+        },
+        "last_check_time": {"type": "string", "format": "date-time"}
+      },
+      "required": ["risk_level", "grid_enabled", "checks"]
+    },
+    "strategy": {
+      "type": "object",
+      "description": "策略配置",
+      "properties": {
+        "name": {"type": "string", "description": "策略名称"},
+        "symbol": {"type": "string"},
+        "exchange": {"type": "string"},
+        "regime": {"type": "string", "enum": ["BULLISH", "NEUTRAL", "BEARISH"]},
+        "buy_weight": {"type": "number", "description": "买入权重"},
+        "sell_weight": {"type": "number", "description": "卖出权重"},
+        "support": {"type": "number"},
+        "resistance": {"type": "number"},
+        "range_usd": {"type": "number"},
+        "range_pct": {"type": "number"},
+        "current_spacing_usd": {"type": "number", "description": "当前网格间距 (USD)"},
+        "current_spacing_pct": {"type": "number"},
+        "grid_levels_total": {"type": "integer"},
+        "grid_levels_buy": {"type": "integer"},
+        "grid_levels_sell": {"type": "integer"},
+        "initial_cash": {"type": "number"},
+        "leverage": {"type": "number"},
+        "max_inventory_risk": {"type": "number"},
+        "max_unrealized_loss": {"type": "number"},
+        "start_time": {"type": "string", "format": "date-time"},
+        "uptime_seconds": {"type": "integer"}
+      },
+      "required": ["name", "symbol", "regime", "support", "resistance"]
+    },
+    "grid": {
+      "type": "object",
+      "description": "网格状态",
+      "properties": {
+        "support": {"type": "number"},
+        "resistance": {"type": "number"},
+        "current_price": {"type": "number"},
+        "levels": {
+          "type": "array",
+          "description": "所有网格层级",
+          "items": {
+            "type": "object",
+            "properties": {
+              "index": {"type": "integer", "description": "层级索引"},
+              "direction": {"type": "string", "enum": ["buy", "sell"]},
+              "price": {"type": "number"},
+              "status": {"type": "string", "enum": ["pending", "filled", "blocked", "inactive"]},
+              "block_reason": {"type": ["string", "null"]},
+              "fills_today": {"type": "integer"},
+              "order_id": {"type": ["string", "null"]}
+            }
+          }
+        },
+        "active_buy_levels": {"type": "integer"},
+        "active_sell_levels": {"type": "integer"},
+        "total_pending_orders": {"type": "integer"},
+        "total_fills_today": {"type": "integer"}
+      }
+    },
+    "orders": {
+      "type": "array",
+      "description": "最近订单（最多100条）",
+      "maxItems": 100,
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {"type": "string"},
+          "timestamp": {"type": "string", "format": "date-time"},
+          "direction": {"type": "string", "enum": ["buy", "sell"]},
+          "level": {"type": "integer"},
+          "price": {"type": "number"},
+          "size": {"type": "number"},
+          "notional": {"type": "number"},
+          "commission": {"type": "number"},
+          "slippage": {"type": "number"},
+          "order_id": {"type": "string"},
+          "execution_type": {"type": "string"},
+          "matched_trade": {
+            "type": ["object", "null"],
+            "properties": {
+              "entry_time": {"type": "string"},
+              "entry_price": {"type": "number"},
+              "exit_time": {"type": "string"},
+              "exit_price": {"type": "number"},
+              "holding_seconds": {"type": "integer"},
+              "pnl": {"type": "number"},
+              "return_pct": {"type": "number"}
+            }
+          },
+          "factors": {
+            "type": "object",
+            "properties": {
+              "mr_z": {"type": "number"},
+              "trend_score": {"type": "number"},
+              "breakout_risk_down": {"type": "number"},
+              "breakout_risk_up": {"type": "number"},
+              "range_pos": {"type": "number"},
+              "funding_rate": {"type": "number"},
+              "combined_edge": {"type": "number"}
+            }
+          }
+        }
+      }
+    },
+    "risk_log": {
+      "type": "array",
+      "description": "风控日志（最近200条）",
+      "maxItems": 200,
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {"type": "string"},
+          "timestamp": {"type": "string", "format": "date-time"},
+          "event_type": {
+            "type": "string",
+            "enum": ["ORDER_ALLOWED", "ORDER_BLOCKED", "RISK_LEVEL_UP", "RISK_LEVEL_DOWN", "GRID_SHUTDOWN", "GRID_RECOVERY"]
+          },
+          "severity": {"type": "string", "enum": ["INFO", "WARNING", "CRITICAL"]},
+          "blocked_order": {
+            "type": ["object", "null"],
+            "properties": {
+              "direction": {"type": "string"},
+              "level": {"type": "integer"},
+              "price": {"type": "number"},
+              "size": {"type": "number"},
+              "notional": {"type": "number"}
+            }
+          },
+          "reason": {"type": "string"},
+          "details": {"type": "string"},
+          "portfolio_state": {
+            "type": "object",
+            "properties": {
+              "equity": {"type": "number"},
+              "net_position": {"type": "number"},
+              "position_value": {"type": "number"},
+              "max_capacity": {"type": "number"},
+              "inventory_risk_pct": {"type": "number"},
+              "unrealized_pnl": {"type": "number"},
+              "unrealized_pnl_pct": {"type": "number"},
+              "risk_level": {"type": "integer"}
+            }
+          }
+        }
+      }
+    },
+    "performance": {
+      "type": "object",
+      "description": "绩效指标",
+      "properties": {
+        "total_return_pct": {"type": "number"},
+        "daily_return_pct": {"type": "number"},
+        "rolling_7d_return_pct": {"type": "number"},
+        "max_drawdown_pct": {"type": "number"},
+        "max_drawdown_time": {"type": "string"},
+        "current_drawdown_pct": {"type": "number"},
+        "sharpe_ratio_30d": {"type": "number"},
+        "sortino_ratio_30d": {"type": "number"},
+        "calmar_ratio": {"type": "number"},
+        "win_rate": {"type": "number"},
+        "profit_factor": {"type": "number"},
+        "avg_win": {"type": "number"},
+        "avg_loss": {"type": "number"},
+        "largest_win": {"type": "number"},
+        "largest_loss": {"type": "number"}
+      }
+    },
+    "system": {
+      "type": "object",
+      "description": "系统健康状态",
+      "properties": {
+        "bot_status": {"type": "string", "enum": ["RUNNING", "STOPPED", "ERROR"]},
+        "last_heartbeat": {"type": "string", "format": "date-time"},
+        "expected_bar_interval_seconds": {"type": "integer"},
+        "actual_last_bar_seconds_ago": {"type": "integer"},
+        "data_feed_status": {"type": "string", "enum": ["CONNECTED", "DISCONNECTED", "ERROR"]},
+        "data_feed_latency_ms": {"type": "number"},
+        "data_feed_last_update": {"type": "string"},
+        "exchange_api_status": {"type": "string", "enum": ["CONNECTED", "DISCONNECTED", "ERROR"]},
+        "exchange_api_latency_ms": {"type": "number"},
+        "exchange_api_last_order": {"type": "string"},
+        "last_bar_processing_time_ms": {"type": "number"},
+        "avg_bar_processing_time_ms": {"type": "number"},
+        "peak_bar_processing_time_ms": {"type": "number"},
+        "error_count_24h_critical": {"type": "integer"},
+        "error_count_24h_warning": {"type": "integer"}
+      }
+    }
+  },
+  "required": ["ts", "mode", "portfolio", "position", "market", "risk", "strategy"]
+}

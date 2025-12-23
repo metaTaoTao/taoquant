@@ -1,0 +1,130 @@
+{
+  "ts": "2025-12-23T01:28:00+00:00",
+  "mode": "dryrun",
+  "portfolio": {
+    "equity": 100.0112793112254,
+    "initial_cash": 100.0,
+    "realized_pnl": -69.4535000986326,
+    "unrealized_pnl": 69.464779409858,
+    "total_pnl": 0.01127931122539394,
+    "total_pnl_pct": 0.0001127931122539394,
+    "daily_pnl": 0,
+    "daily_pnl_pct": 0,
+    "peak_equity_today": 100.0112793112254,
+    "peak_equity_today_time": "2025-12-23T01:28:00+00:00",
+    "total_trades": 1,
+    "open_positions_count": 1
+  },
+  "position": {
+    "net_position_btc": 0.0007840259707365793,
+    "direction": "LONG",
+    "position_value_usd": 69.464779409858,
+    "avg_cost": 0.0,
+    "breakeven_price": 0.0,
+    "unrealized_pnl": 69.464779409858,
+    "unrealized_pnl_pct": 0.0,
+    "distance_to_cost_pct": 0.0,
+    "long_holdings": 0.0007840259707365793,
+    "short_holdings": 0.0,
+    "cost_basis": 0.0
+  },
+  "market": {
+    "symbol": "BTCUSDT",
+    "exchange": "Bitget",
+    "close": 88600.1,
+    "open": 88600.1,
+    "high": 88600.1,
+    "low": 88600.0,
+    "volume": 0.1056,
+    "change_24h": 0,
+    "change_24h_pct": 0,
+    "high_24h": 88600.1,
+    "low_24h": 88600.1,
+    "atr_14": 0,
+    "spread": 0,
+    "timestamp": "2025-12-23T01:28:00+00:00",
+    "data_latency_ms": 0
+  },
+  "risk": {
+    "risk_level": 0,
+    "grid_enabled": true,
+    "shutdown_reason": null,
+    "checks": {
+      "price_depth": {
+        "status": "OK",
+        "value": 88600.1,
+        "threshold": 83000.0
+      },
+      "unrealized_loss": {
+        "status": "WARN",
+        "value_pct": 0.6945694514484746,
+        "threshold": 0.3,
+        "adjusted_threshold": 0.3
+      },
+      "inventory_risk": {
+        "status": "OK",
+        "value_pct": 0,
+        "threshold": 0.8
+      }
+    },
+    "last_check_time": "2025-12-23T01:28:00+00:00"
+  },
+  "strategy": {
+    "name": "TaoGrid NEUTRAL_RANGE",
+    "symbol": "BTCUSDT",
+    "exchange": "Bitget",
+    "regime": "NEUTRAL_RANGE",
+    "buy_weight": 0.5,
+    "sell_weight": 0.5,
+    "support": 84000.0,
+    "resistance": 94000.0,
+    "range_usd": 10000.0,
+    "range_pct": 0.11904761904761904,
+    "current_spacing_usd": 0,
+    "current_spacing_pct": 0,
+    "grid_levels_total": 0,
+    "grid_levels_buy": 0,
+    "grid_levels_sell": 0,
+    "initial_cash": 100.0,
+    "leverage": 50.0,
+    "max_inventory_risk": 0.8,
+    "max_unrealized_loss": 0.3,
+    "start_time": "2025-12-23T01:17:44.798544+00:00",
+    "uptime_seconds": 615
+  },
+  "orders": [
+    {
+      "ts": "2025-12-23T01:18:00+00:00",
+      "symbol": "BTCUSDT",
+      "side": "BUY",
+      "level": 3,
+      "px": 88568.0,
+      "qty": 0.0007840259707365793,
+      "notional": 69.43961217619736,
+      "fee_est": 0.013887922435239472,
+      "leg": "long",
+      "cash": 30.546499901367397,
+      "net_pos": 0.0007840259707365793,
+      "unreal": 0.007134636333702815
+    }
+  ],
+  "risk_log": [],
+  "performance": {},
+  "system": {
+    "bot_status": "RUNNING",
+    "last_heartbeat": "2025-12-23T01:28:00+00:00",
+    "expected_bar_interval_seconds": 60,
+    "actual_last_bar_seconds_ago": 0,
+    "data_feed_status": "CONNECTED",
+    "data_feed_latency_ms": 0,
+    "data_feed_last_update": "2025-12-23T01:28:00+00:00",
+    "exchange_api_status": "CONNECTED",
+    "exchange_api_latency_ms": 0,
+    "exchange_api_last_order": null,
+    "last_bar_processing_time_ms": 0,
+    "avg_bar_processing_time_ms": 0,
+    "peak_bar_processing_time_ms": 0,
+    "error_count_24h_critical": 0,
+    "error_count_24h_warning": 0
+  }
+}

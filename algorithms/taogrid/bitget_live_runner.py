@@ -41,6 +41,10 @@ class BitgetLiveRunner:
         dry_run: bool = False,
         log_dir: str = "logs/bitget_live",
         execution_model: Optional[Dict[str, Any]] = None,
+        # --- Live Status Output ---
+        enable_live_status: bool = False,
+        live_status_file: Optional[Path] = None,
+        live_status_update_frequency: int = 1,
     ):
         """
         Initialize Bitget live runner.
@@ -142,6 +146,13 @@ class BitgetLiveRunner:
         self._recent_bars: Optional[pd.DataFrame] = None
         self._recent_bars_maxlen: int = 3000
         self._last_factor_state: Dict[str, Any] = {}
+
+        # --- Live Status Output ---
+        self.enable_live_status = bool(enable_live_status)
+        self.live_status_file = live_status_file
+        self.live_status_update_frequency = max(1, int(live_status_update_frequency))
+        self._live_status_update_counter = 0
+        self._start_time = datetime.now(timezone.utc)  # Track start time for uptime
 
         # Initialize strategy
         self._initialize_strategy()
@@ -1551,6 +1562,9 @@ class BitgetLiveRunner:
                         portfolio_state=portfolio_state,
                     )
 
+                    # Update live_status.json for dashboard
+                    self._update_live_status(latest_bar, bar_timestamp)
+
                     # Wait for next minute
                     # Calculate sleep time to align with minute boundary
                     now = datetime.now(timezone.utc)
@@ -1573,3 +1587,196 @@ class BitgetLiveRunner:
             self.logger.log_info("=" * 80)
             self.logger.log_info("Live Trading Runner Stopped")
             self.logger.log_info("=" * 80)
+
+    # ====================================================================
+    # Live Status Output Methods
+    # ====================================================================
+
+    def _atomic_write_json(self, filepath: Path, data: dict) -> None:
+        """Atomically write JSON to file (temp + rename)."""
+        filepath.parent.mkdir(parents=True, exist_ok=True)
+        temp_file = filepath.with_suffix('.tmp')
+        with open(temp_file, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        temp_file.replace(filepath)
+
+    def _build_live_status_dict(self, current_bar: dict, timestamp: datetime) -> dict:
+        """Build complete live status dictionary for dashboard."""
+        # Get portfolio state
+        price = float(current_bar['close'])
+        portfolio_state = self._get_portfolio_state(current_price=price)
+
+        # Calculate uptime
+        uptime_seconds = int((timestamp - self._start_time).total_seconds())
+
+        # Extract key values
+        equity = float(portfolio_state.get('equity', self.config.initial_cash))
+        cash = float(portfolio_state.get('cash', self.config.initial_cash))
+        long_holdings = float(portfolio_state.get('long_holdings', 0.0))
+        short_holdings = float(portfolio_state.get('short_holdings', 0.0))
+        net_position_btc = long_holdings - short_holdings
+        total_cost_basis = float(portfolio_state.get('total_cost_basis', 0.0))
+        total_short_entry_value = float(portfolio_state.get('total_short_entry_value', 0.0))
+
+        # Get PnL from grid_manager and portfolio_state
+        unrealized_pnl = float(portfolio_state.get('unrealized_pnl', 0.0))
+        realized_pnl = float(getattr(self.algorithm.grid_manager, 'realized_pnl', 0.0) or 0.0)
+        total_pnl = equity - self.config.initial_cash
+
+        # Position direction
+        if abs(net_position_btc) < 0.0001:
+            direction = "FLAT"
+        elif net_position_btc > 0:
+            direction = "LONG"
+        else:
+            direction = "SHORT"
+
+        # Average cost - use ledger method for accuracy
+        avg_cost = self._get_avg_cost_from_ledger() or 0.0
+
+        # Calculate 24h market data from recent bars
+        high_24h = price
+        low_24h = price
+        change_24h = 0.0
+        change_24h_pct = 0.0
+        if self._recent_bars is not None and len(self._recent_bars) >= 1440:
+            # 1440 minutes = 24 hours
+            recent_24h = self._recent_bars.tail(1440)
+            high_24h = float(recent_24h['high'].max())
+            low_24h = float(recent_24h['low'].min())
+            open_24h = float(recent_24h.iloc[0]['open'])
+            change_24h = price - open_24h
+            change_24h_pct = change_24h / open_24h if open_24h > 0 else 0.0
+
+        # Calculate inventory risk
+        # Inventory risk = abs(net_position_value) / equity
+        inventory_risk_pct = abs(net_position_btc * price) / equity if equity > 0 else 0.0
+
+        # Build complete status dict
+        return {
+            "ts": timestamp.isoformat(),
+            "mode": "dryrun" if self.dry_run else "live",
+            "portfolio": {
+                "equity": equity,
+                "initial_cash": self.config.initial_cash,
+                "realized_pnl": realized_pnl,
+                "unrealized_pnl": unrealized_pnl,
+                "total_pnl": total_pnl,
+                "total_pnl_pct": total_pnl / self.config.initial_cash if self.config.initial_cash > 0 else 0.0,
+                "daily_pnl": 0,  # TODO: Track daily PnL
+                "daily_pnl_pct": 0,  # TODO: Track daily PnL %
+                "peak_equity_today": equity,  # TODO: Track peak
+                "peak_equity_today_time": timestamp.isoformat(),
+                "total_trades": len(self._blotter_events),
+                "open_positions_count": 1 if abs(net_position_btc) >= 0.0001 else 0
+            },
+            "position": {
+                "net_position_btc": net_position_btc,
+                "direction": direction,
+                "position_value_usd": abs(net_position_btc) * price,
+                "avg_cost": avg_cost,
+                "breakeven_price": avg_cost,  # Simplified
+                "unrealized_pnl": unrealized_pnl,
+                "unrealized_pnl_pct": (unrealized_pnl / total_cost_basis) if total_cost_basis > 0 else 0.0,
+                "distance_to_cost_pct": ((price - avg_cost) / avg_cost) if avg_cost > 0 else 0.0,
+                "long_holdings": long_holdings,
+                "short_holdings": short_holdings,
+                "cost_basis": total_cost_basis
+            },
+            "market": {
+                "symbol": self.symbol,
+                "exchange": "Bitget",
+                "close": price,
+                "open": float(current_bar.get('open', price)),
+                "high": float(current_bar.get('high', price)),
+                "low": float(current_bar.get('low', price)),
+                "volume": float(current_bar.get('volume', 0.0)),
+                "change_24h": change_24h,
+                "change_24h_pct": change_24h_pct,
+                "high_24h": high_24h,
+                "low_24h": low_24h,
+                "atr_14": 0,  # TODO: Calculate if needed
+                "spread": 0,
+                "timestamp": timestamp.isoformat(),
+                "data_latency_ms": 0
+            },
+            "risk": {
+                "risk_level": 0,  # TODO: Implement risk level logic
+                "grid_enabled": True,
+                "shutdown_reason": None,
+                "checks": {
+                    "price_depth": {
+                        "status": "OK",
+                        "value": price,
+                        "threshold": self.config.support - 2.0 * 500  # Simplified
+                    },
+                    "unrealized_loss": {
+                        "status": "OK" if abs(unrealized_pnl / equity) < self.config.max_risk_loss_pct else "WARN",
+                        "value_pct": unrealized_pnl / equity if equity > 0 else 0.0,
+                        "threshold": self.config.max_risk_loss_pct,
+                        "adjusted_threshold": self.config.max_risk_loss_pct
+                    },
+                    "inventory_risk": {
+                        "status": "OK" if inventory_risk_pct < self.config.max_risk_inventory_pct else "WARN",
+                        "value_pct": inventory_risk_pct,
+                        "threshold": self.config.max_risk_inventory_pct
+                    }
+                },
+                "last_check_time": timestamp.isoformat()
+            },
+            "strategy": {
+                "name": f"TaoGrid {self.config.regime}",
+                "symbol": self.symbol,
+                "exchange": "Bitget",
+                "regime": self.config.regime,
+                "buy_weight": 0.70 if self.config.regime == "BULLISH_RANGE" else 0.50,
+                "sell_weight": 0.30 if self.config.regime == "BULLISH_RANGE" else 0.50,
+                "support": self.config.support,
+                "resistance": self.config.resistance,
+                "range_usd": self.config.resistance - self.config.support,
+                "range_pct": (self.config.resistance - self.config.support) / self.config.support,
+                "current_spacing_usd": 0,  # TODO: Calculate from grid
+                "current_spacing_pct": 0,
+                "grid_levels_total": 0,  # TODO: Get from grid_manager
+                "grid_levels_buy": 0,
+                "grid_levels_sell": 0,
+                "initial_cash": self.config.initial_cash,
+                "leverage": self.config.leverage,
+                "max_inventory_risk": self.config.max_risk_inventory_pct,
+                "max_unrealized_loss": self.config.max_risk_loss_pct,
+                "start_time": self._start_time.isoformat(),
+                "uptime_seconds": uptime_seconds
+            },
+            "orders": [evt for evt in self._blotter_events[-100:]],  # Last 100 orders
+            "risk_log": [],  # TODO: Implement risk log
+            "performance": {},  # TODO: Calculate performance metrics
+            "system": {
+                "bot_status": "RUNNING",
+                "last_heartbeat": timestamp.isoformat(),
+                "expected_bar_interval_seconds": 60,
+                "actual_last_bar_seconds_ago": 0,
+                "data_feed_status": "CONNECTED",
+                "data_feed_latency_ms": 0,
+                "data_feed_last_update": timestamp.isoformat(),
+                "exchange_api_status": "CONNECTED",
+                "exchange_api_latency_ms": 0,
+                "exchange_api_last_order": None,  # TODO: Track last order time
+                "last_bar_processing_time_ms": 0,
+                "avg_bar_processing_time_ms": 0,
+                "peak_bar_processing_time_ms": 0,
+                "error_count_24h_critical": 0,
+                "error_count_24h_warning": 0
+            }
+        }
+
+    def _update_live_status(self, current_bar: dict, timestamp: datetime) -> None:
+        """Conditionally update live_status.json based on frequency."""
+        if not self.enable_live_status or self.live_status_file is None:
+            return
+
+        self._live_status_update_counter += 1
+        if self._live_status_update_counter % self.live_status_update_frequency != 0:
+            return
+
+        status = self._build_live_status_dict(current_bar, timestamp)
+        self._atomic_write_json(self.live_status_file, status)

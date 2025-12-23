@@ -55,6 +55,10 @@ class SimpleLeanRunner:
         abnormal_buy_notional_frac_equity: float = 0.0,  # 异常触发：当分钟新增买入 notional >= x * equity（例如 0.03）
         abnormal_range_mult_spacing: float = 0.0,     # 异常触发：振幅 >= k * spacing（例如 4）
         cooldown_active_buy_levels: int = 0,          # 冷却期仅保留的买单层数（例如 2）
+        # --- Live Status Output ---
+        enable_live_status: bool = False,              # 是否启用live status输出
+        live_status_file: Path | None = None,         # live status输出文件路径
+        live_status_update_frequency: int = 1,        # 每N个bar更新一次（1=每个bar）
     ):
         """Initialize runner with config."""
         self.config = config
@@ -79,6 +83,12 @@ class SimpleLeanRunner:
         self._buy_cooldown_until: datetime | None = None
         self._spacing_pct_est: float | None = None
         self._last_mid_shift_bar_index: int = -10**9
+
+        # Live status output
+        self.enable_live_status = bool(enable_live_status)
+        self.live_status_file = live_status_file
+        self.live_status_update_frequency = max(1, int(live_status_update_frequency))
+        self._live_status_update_counter = 0
 
         self.algorithm = TaoGridLeanAlgorithm(config)
 
@@ -554,6 +564,9 @@ class SimpleLeanRunner:
                 self._equity_timestamps.append(timestamp)
                 self._equity_values.append(float(current_equity))
 
+            # Update live_status.json
+            self._update_live_status(row, timestamp)
+
         if self.verbose:
             print()
             print("  Backtest completed!")
@@ -994,6 +1007,182 @@ class SimpleLeanRunner:
                 return True  # Order executed
 
         return False  # Order not executed (insufficient cash/holdings)
+
+    def _atomic_write_json(self, filepath: Path, data: dict) -> None:
+        """Atomically write JSON to file (temp + rename)."""
+        filepath.parent.mkdir(parents=True, exist_ok=True)
+        temp_file = filepath.with_suffix('.tmp')
+        with open(temp_file, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        temp_file.replace(filepath)
+
+    def _build_live_status_dict(self, current_bar: dict, timestamp: datetime) -> dict:
+        """Build complete live_status data structure."""
+        # Calculate current portfolio state
+        price = float(current_bar['close'])
+        equity = self.cash + (self.long_holdings * price) - (self.short_holdings * price)
+        long_value = self.long_holdings * price
+        short_value = self.short_holdings * price
+        unrealized_pnl = (long_value - self.total_cost_basis) + (self.total_short_entry_value - short_value)
+
+        # Portfolio metrics
+        total_pnl = equity - self.config.initial_cash
+        realized_pnl = total_pnl - unrealized_pnl
+
+        # Position metrics
+        net_position = self.long_holdings - self.short_holdings
+        avg_cost = self.total_cost_basis / self.long_holdings if self.long_holdings > 0 else 0
+
+        # Get grid manager state
+        gm = self.algorithm.grid_manager
+
+        # Build the full status dict
+        status = {
+            "ts": timestamp.isoformat(),
+            "mode": "dryrun",  # Will be configurable
+            "portfolio": {
+                "equity": equity,
+                "initial_cash": self.config.initial_cash,
+                "realized_pnl": realized_pnl,
+                "unrealized_pnl": unrealized_pnl,
+                "total_pnl": total_pnl,
+                "total_pnl_pct": total_pnl / self.config.initial_cash if self.config.initial_cash > 0 else 0,
+                "daily_pnl": 0,  # TODO: Calculate
+                "daily_pnl_pct": 0,
+                "peak_equity_today": equity,  # TODO: Track
+                "peak_equity_today_time": timestamp.isoformat(),
+                "total_trades": len(self.trades),
+                "open_positions_count": len(self.long_positions)
+            },
+            "position": {
+                "net_position_btc": net_position,
+                "direction": "LONG" if net_position > 0 else ("SHORT" if net_position < 0 else "FLAT"),
+                "position_value_usd": abs(net_position) * price,
+                "avg_cost": avg_cost,
+                "breakeven_price": avg_cost,  # Simplified
+                "unrealized_pnl": unrealized_pnl,
+                "unrealized_pnl_pct": unrealized_pnl / equity if equity > 0 else 0,
+                "distance_to_cost_pct": (price - avg_cost) / avg_cost if avg_cost > 0 else 0,
+                "long_holdings": self.long_holdings,
+                "short_holdings": self.short_holdings,
+                "cost_basis": self.total_cost_basis
+            },
+            "market": {
+                "symbol": self.symbol,
+                "exchange": "OKX",  # TODO: Make configurable
+                "close": price,
+                "open": float(current_bar.get('open', price)),
+                "high": float(current_bar.get('high', price)),
+                "low": float(current_bar.get('low', price)),
+                "volume": float(current_bar.get('volume', 0)),
+                "change_24h": 0,  # TODO: Calculate
+                "change_24h_pct": 0,
+                "high_24h": price,
+                "low_24h": price,
+                "atr_14": 0,  # TODO: Calculate from data
+                "spread": 0,
+                "timestamp": timestamp.isoformat(),
+                "data_latency_ms": 0
+            },
+            "risk": {
+                "risk_level": gm.risk_level,
+                "grid_enabled": gm.grid_enabled,
+                "shutdown_reason": gm.grid_shutdown_reason,
+                "checks": {
+                    "price_depth": {
+                        "status": "OK",  # TODO: Calculate
+                        "value": price,
+                        "threshold": self.config.support - (3.0 * 500)  # TODO: Use actual ATR
+                    },
+                    "unrealized_loss": {
+                        "status": "OK" if unrealized_pnl >= 0 else "WARN",
+                        "value_pct": abs(unrealized_pnl) / equity if equity > 0 else 0,
+                        "threshold": 0.30,
+                        "adjusted_threshold": 0.30
+                    },
+                    "inventory_risk": {
+                        "status": "OK",
+                        "value_pct": 0,  # TODO: Calculate
+                        "threshold": 0.80
+                    }
+                },
+                "last_check_time": timestamp.isoformat()
+            },
+            "strategy": {
+                "name": f"TaoGrid {self.config.regime}",
+                "symbol": self.symbol,
+                "exchange": "OKX",
+                "regime": self.config.regime,
+                "buy_weight": 0.70 if self.config.regime == "BULLISH_RANGE" else 0.50,  # TODO: Get from config
+                "sell_weight": 0.30 if self.config.regime == "BULLISH_RANGE" else 0.50,
+                "support": self.config.support,
+                "resistance": self.config.resistance,
+                "range_usd": self.config.resistance - self.config.support,
+                "range_pct": (self.config.resistance - self.config.support) / self.config.support,
+                "current_spacing_usd": 0,  # TODO: Calculate
+                "current_spacing_pct": 0,
+                "grid_levels_total": 0,  # TODO: Calculate
+                "grid_levels_buy": 0,
+                "grid_levels_sell": 0,
+                "initial_cash": self.config.initial_cash,
+                "leverage": self.config.leverage,
+                "max_inventory_risk": 0.80,  # TODO: Get from config
+                "max_unrealized_loss": 0.30,
+                "start_time": self.start_date.isoformat(),
+                "uptime_seconds": int((timestamp - self.start_date).total_seconds())
+            },
+            "orders": [
+                {
+                    "id": f"order_{i}",
+                    "timestamp": order['timestamp'].isoformat() if isinstance(order['timestamp'], datetime) else order['timestamp'],
+                    "direction": order['direction'],
+                    "level": order['level'],
+                    "price": order['price'],
+                    "size": order['size'],
+                    "notional": order.get('cost', 0) if order['direction'] == 'buy' else order.get('proceeds', 0),
+                    "commission": order['commission'],
+                    "slippage": order.get('slippage', 0),
+                    "order_id": f"mock_{i}",
+                    "execution_type": "LIMIT_FILLED",
+                    "matched_trade": None,  # TODO: Link to trades
+                    "factors": {}
+                }
+                for i, order in enumerate(self.orders[-100:])  # Last 100 orders
+            ],
+            "risk_log": [],  # TODO: Implement
+            "performance": {},  # TODO: Calculate
+            "system": {
+                "bot_status": "RUNNING",
+                "last_heartbeat": timestamp.isoformat(),
+                "expected_bar_interval_seconds": 60,  # TODO: Parse from timeframe
+                "actual_last_bar_seconds_ago": 0,
+                "data_feed_status": "CONNECTED",
+                "data_feed_latency_ms": 0,
+                "data_feed_last_update": timestamp.isoformat(),
+                "exchange_api_status": "CONNECTED",
+                "exchange_api_latency_ms": 0,
+                "exchange_api_last_order": timestamp.isoformat() if self.orders else None,
+                "last_bar_processing_time_ms": 0,
+                "avg_bar_processing_time_ms": 0,
+                "peak_bar_processing_time_ms": 0,
+                "error_count_24h_critical": 0,
+                "error_count_24h_warning": 0
+            }
+        }
+
+        return status
+
+    def _update_live_status(self, current_bar: dict, timestamp: datetime) -> None:
+        """Update live_status.json file."""
+        if not self.enable_live_status or self.live_status_file is None:
+            return
+
+        self._live_status_update_counter += 1
+        if self._live_status_update_counter % self.live_status_update_frequency != 0:
+            return
+
+        status = self._build_live_status_dict(current_bar, timestamp)
+        self._atomic_write_json(self.live_status_file, status)
 
     def calculate_metrics(self) -> dict:
         """Calculate performance metrics."""
