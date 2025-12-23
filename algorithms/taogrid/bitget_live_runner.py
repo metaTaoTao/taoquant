@@ -1220,7 +1220,7 @@ class BitgetLiveRunner:
         leg_tag = leg if leg is not None else "long"
         return f"{self._client_oid_prefix}{direction}_{int(level_index)}_{leg_tag}"
 
-    def _apply_active_buy_levels_filter(self, current_price: float, keep_levels: int) -> None:
+    def _apply_active_buy_levels_filter(self, current_price: float, keep_levels: int, already_on_exchange: set | None = None) -> None:
         """
         Keep only the nearest `keep_levels` BUY pending orders (below current price) enabled.
 
@@ -1230,6 +1230,12 @@ class BitgetLiveRunner:
         - This affects both:
           (1) real exchange sync (which orders are placed/cancelled)
           (2) dry-run fill simulation (which orders are eligible to trigger)
+
+        Parameters
+        ----------
+        already_on_exchange : set | None
+            Set of (direction, level_index, leg) tuples for orders already on the exchange.
+            These orders are given priority to avoid unnecessary cancel/re-place cycles.
         """
         if keep_levels <= 0:
             return
@@ -1242,24 +1248,51 @@ class BitgetLiveRunner:
         if not buy_orders:
             return
 
-        # Eligible BUY orders are those below/at current price (resting buy).
-        eligible = [o for o in buy_orders if float(o.get("price", 0.0)) <= float(current_price)]
+        # Apply buffer to avoid orders too close to current price (consistent with _sync_exchange_orders)
+        buffer_pct = 0.0005  # 0.05% buffer
+        price_threshold = current_price * (1.0 - buffer_pct)
+
+        # Eligible BUY orders are those below the buffer threshold (not just below current price).
+        eligible = [o for o in buy_orders if float(o.get("price", 0.0)) <= price_threshold]
         if len(eligible) <= keep_levels:
-            # Enable all eligible, disable ineligible (above market)
+            # Enable all eligible, disable ineligible (above threshold)
             for o in buy_orders:
-                o["placed"] = float(o.get("price", 0.0)) <= float(current_price)
+                o["placed"] = float(o.get("price", 0.0)) <= price_threshold
                 if not o["placed"]:
                     o["triggered"] = False
             return
 
-        # Sort eligible by distance to current price (closest first), keep top N
-        eligible_sorted = sorted(eligible, key=lambda o: abs(float(current_price) - float(o.get("price", 0.0))))
-        keep_ids = {(o.get("direction"), int(o.get("level_index", -1)), o.get("leg")) for o in eligible_sorted[:keep_levels]}
+        # Build keep_ids with sticky behavior:
+        # 1. First, keep orders already on exchange (if eligible)
+        # 2. Then fill remaining slots with closest orders
+        already_on_exchange = already_on_exchange or set()
+        
+        # Partition eligible into "already placed" and "new"
+        already_placed_eligible = []
+        new_eligible = []
+        for o in eligible:
+            oid = (o.get("direction"), int(o.get("level_index", -1)), o.get("leg"))
+            if oid in already_on_exchange:
+                already_placed_eligible.append(o)
+            else:
+                new_eligible.append(o)
+        
+        # Sort both by distance (closest first)
+        already_placed_eligible.sort(key=lambda o: abs(float(current_price) - float(o.get("price", 0.0))))
+        new_eligible.sort(key=lambda o: abs(float(current_price) - float(o.get("price", 0.0))))
+        
+        # Keep already-placed orders first, then fill with new ones
+        keep_list = already_placed_eligible[:keep_levels]
+        remaining_slots = keep_levels - len(keep_list)
+        if remaining_slots > 0:
+            keep_list.extend(new_eligible[:remaining_slots])
+        
+        keep_ids = {(o.get("direction"), int(o.get("level_index", -1)), o.get("leg")) for o in keep_list}
 
         # Enable kept orders; disable the rest (and clear triggered state)
         for o in buy_orders:
             oid = (o.get("direction"), int(o.get("level_index", -1)), o.get("leg"))
-            is_eligible = float(o.get("price", 0.0)) <= float(current_price)
+            is_eligible = float(o.get("price", 0.0)) <= price_threshold
             o["placed"] = bool(is_eligible and oid in keep_ids)
             if not o["placed"]:
                 o["triggered"] = False
@@ -1743,7 +1776,29 @@ class BitgetLiveRunner:
                         keep_n = int(self.active_buy_levels)
                         if self._in_cooldown(bar_timestamp) and self.cooldown_active_buy_levels > 0:
                             keep_n = int(self.cooldown_active_buy_levels)
-                        self._apply_active_buy_levels_filter(current_price=cp, keep_levels=keep_n)
+                        
+                        # Get orders already on exchange for sticky behavior
+                        already_on_exchange: set = set()
+                        if not self.dry_run:
+                            try:
+                                open_orders = self.execution_engine.get_open_orders(self.symbol) or []
+                                for oo in open_orders:
+                                    coid = str(oo.get("client_order_id") or "")
+                                    if coid.startswith(self._client_oid_prefix):
+                                        # Parse: tg_BTCUSDT_TS_buy_11_long -> direction=buy, level=11, leg=long
+                                        suffix = coid[len(self._client_oid_prefix):]
+                                        parts = suffix.split("_")
+                                        if len(parts) >= 3:
+                                            direction, level_str, leg = parts[0], parts[1], parts[2]
+                                            already_on_exchange.add((direction, int(level_str), leg))
+                            except Exception:
+                                pass  # If we can't get orders, proceed without sticky behavior
+                        
+                        self._apply_active_buy_levels_filter(
+                            current_price=cp, 
+                            keep_levels=keep_n, 
+                            already_on_exchange=already_on_exchange
+                        )
 
                     # Prepare bar data
                     bar_data = {
