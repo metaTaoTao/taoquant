@@ -586,7 +586,24 @@ class BitgetLiveRunner:
         # Place initial grid orders
         # IMPORTANT: pass current price so we don't place crossing orders at bootstrap
         # (otherwise BUY above market / SELL below market can execute immediately as taker).
-        self._sync_exchange_orders(current_price=float(last_px))
+        # Also skip safety limits during bootstrap to ensure initial grid is fully placed.
+        self.logger.log_info(f"[BOOTSTRAP] Placing initial grid orders at current_price=${last_px:.2f} (bypassing safety limits)")
+        self._sync_exchange_orders(current_price=float(last_px), skip_safety_limits=True)
+        
+        # Verify orders were placed (best-effort check)
+        try:
+            open_orders = self.execution_engine.get_open_orders(self.symbol) or []
+            bot_open = [oo for oo in open_orders if str(oo.get("client_order_id") or "").startswith(self._client_oid_prefix)]
+            self.logger.log_info(f"[BOOTSTRAP] Verification: {len(bot_open)} bot orders currently open on exchange")
+            if bot_open:
+                for oo in bot_open[:5]:  # Show first 5
+                    self.logger.log_info(
+                        f"  - {str(oo.get('side', '')).upper()} @ ${float(oo.get('price', 0) or 0):.2f} "
+                        f"qty={float(oo.get('quantity', 0) or 0):.6f} "
+                        f"client_oid={str(oo.get('client_order_id', ''))}"
+                    )
+        except Exception as e:
+            self.logger.log_warning(f"[BOOTSTRAP] Could not verify open orders: {e}")
 
     def _replay_fills_best_effort(self) -> None:
         """
@@ -1295,7 +1312,7 @@ class BitgetLiveRunner:
         self._safety_orders_count += 1
         self._safety_notional_added += float(notional)
 
-    def _sync_exchange_orders(self, current_price: Optional[float], current_time: Optional[datetime] = None) -> None:
+    def _sync_exchange_orders(self, current_price: Optional[float], current_time: Optional[datetime] = None, skip_safety_limits: bool = False) -> None:
         """
         Sync algorithm.pending_limit_orders -> exchange open orders.
 
@@ -1304,6 +1321,11 @@ class BitgetLiveRunner:
         - Sizes are recomputed each bar using the same sizing function (factors + equity).
         - Orders are only eligible if they won't immediately cross the market:
           BUY only if level_price <= current_price; SELL only if level_price >= current_price.
+        
+        Parameters
+        ----------
+        skip_safety_limits : bool
+            If True, bypass safety rate limits (useful for bootstrap to place initial grid).
         """
         # If grid disabled, cancel all bot orders (real) or just log (dry-run).
         if not bool(self.algorithm.grid_manager.grid_enabled):
@@ -1498,7 +1520,7 @@ class BitgetLiveRunner:
                         continue
 
             notional = float(qty) * float(price)
-            if not self._safety_can_place(now=now_ts, notional=notional, equity=equity_for_limits):
+            if not skip_safety_limits and not self._safety_can_place(now=now_ts, notional=notional, equity=equity_for_limits):
                 self.logger.log_warning(
                     "[SAFETY] place limited; skip new orders this minute "
                     f"(orders={self._safety_orders_count}, cancels={self._safety_cancels_count}, "
@@ -1548,6 +1570,17 @@ class BitgetLiveRunner:
                     "client_order_id": client_oid,
                     "reason": o.get("reason"),
                 }
+                # Log successful order placement (especially important for bootstrap)
+                self.logger.log_info(
+                    f"[ORDER_PLACED] {direction.upper()} L{level_index+1} @ ${price:.2f} "
+                    f"qty={qty:.6f} notional=${notional:.2f} "
+                    f"order_id={oid} client_oid={client_oid}"
+                )
+            else:
+                self.logger.log_warning(
+                    f"[ORDER_FAILED] {direction.upper()} L{level_index+1} @ ${price:.2f} "
+                    f"qty={qty:.6f} - place_order returned None/empty"
+                )
 
     def run(self):
         """Main execution loop."""
