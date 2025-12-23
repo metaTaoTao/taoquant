@@ -101,13 +101,25 @@ class BitgetExecutionEngine:
             if client_order_id:
                 extra.setdefault("clientOid", str(client_order_id))
 
-            amount = float(self.exchange.amount_to_precision(ccxt_symbol, quantity))
+            # Get market precision info
+            market = self.exchange.market(ccxt_symbol)
+            
+            # Round quantity to exchange precision (typically 0.0001 for BTC)
+            # Use explicit rounding instead of truncation for better accuracy
+            amount_precision = market.get("precision", {}).get("amount", 4)
+            if isinstance(amount_precision, int):
+                # Precision is number of decimal places
+                amount = round(float(quantity), amount_precision)
+            else:
+                # Precision might be step size (e.g., 0.0001)
+                step = float(amount_precision) if amount_precision else 0.0001
+                amount = round(float(quantity) / step) * step
+                amount = round(amount, 8)  # Clean up floating point errors
             
             # Check if amount meets minimum requirements
-            market = self.exchange.market(ccxt_symbol)
             min_amount = market.get("limits", {}).get("amount", {}).get("min", 0)
             if self.debug:
-                print(f"[Bitget CCXT Engine] amount_to_precision: {quantity} -> {amount}, min_amount={min_amount}")
+                print(f"[Bitget CCXT Engine] quantity rounded: {quantity} -> {amount} (precision={amount_precision}, min={min_amount})")
             if min_amount and amount < min_amount:
                 import sys
                 print(f"[Bitget place_order REJECTED] amount={amount} < min_amount={min_amount} for {ccxt_symbol}", file=sys.stderr)
