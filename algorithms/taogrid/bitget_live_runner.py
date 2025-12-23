@@ -171,8 +171,10 @@ class BitgetLiveRunner:
         self.pending_orders: Dict[str, Dict[str, Any]] = {}
         # Live bar index (monotonic) used by algorithm time-based guards
         self._bar_index: int = 0
-        # Deterministic client order id prefix for idempotency / recovery
-        self._client_oid_prefix: str = f"taogrid_{self.symbol}_"
+        # Client order id prefix with startup timestamp to ensure uniqueness across restarts
+        # Bitget rejects duplicate clientOid even if previous order failed/cancelled
+        self._startup_ts: int = int(time.time())
+        self._client_oid_prefix: str = f"tg_{self.symbol}_{self._startup_ts}_"
         # Rolling bars window for factor computation
         self._recent_bars: Optional[pd.DataFrame] = None
         self._recent_bars_maxlen: int = 3000
@@ -465,10 +467,13 @@ class BitgetLiveRunner:
             pass
 
         # Cancel all existing bot orders (with convergence loop to handle race conditions).
+        # Use a generic prefix pattern to match orders from ANY previous startup session
+        # (since each startup has unique timestamp in prefix: tg_BTCUSDT_<ts>_)
+        bot_prefix_pattern = f"tg_{self.symbol}_"  # Matches all TaoGrid orders for this symbol
         try:
             cancelled = self.execution_engine.cancel_all_orders(
                 symbol=self.symbol,
-                client_oid_prefix=self._client_oid_prefix,
+                client_oid_prefix=bot_prefix_pattern,
             )
             total_cancelled = int(cancelled or 0)
 
@@ -479,7 +484,7 @@ class BitgetLiveRunner:
                 open_orders = self.execution_engine.get_open_orders(self.symbol) or []
                 bot_orders = [
                     oo for oo in open_orders
-                    if str(oo.get("client_order_id") or "").startswith(self._client_oid_prefix)
+                    if str(oo.get("client_order_id") or "").startswith(bot_prefix_pattern)
                 ]
                 remaining = bot_orders
                 if not bot_orders:
@@ -497,12 +502,12 @@ class BitgetLiveRunner:
 
             if total_cancelled > 0:
                 self.logger.log_info(
-                    f"Cancelled {total_cancelled} previous TaoGrid orders (prefix={self._client_oid_prefix})"
+                    f"Cancelled {total_cancelled} previous TaoGrid orders (pattern={bot_prefix_pattern})"
                 )
             if remaining:
                 self.logger.log_warning(
                     f"[BOOTSTRAP] Residual bot open orders remain after retries: {len(remaining)} "
-                    f"(prefix={self._client_oid_prefix}). Will continue and rely on sync loop."
+                    f"(pattern={bot_prefix_pattern}). Will continue and rely on sync loop."
                 )
         except Exception:
             pass
