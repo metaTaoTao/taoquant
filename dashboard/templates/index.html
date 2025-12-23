@@ -798,7 +798,13 @@
                 'start': '启动',
                 'restart': '重启'
             };
-            if (!confirm(`确定要${actions[action]} Bot 吗？`)) {
+            
+            let confirmMsg = `确定要${actions[action]} Bot 吗？`;
+            if (action === 'stop') {
+                confirmMsg += '\n\n注意：停止时会自动撤销所有挂单（不会平仓）';
+            }
+            
+            if (!confirm(confirmMsg)) {
                 return;
             }
             
@@ -812,7 +818,12 @@
                 });
                 
                 if (response.ok) {
-                    alert(`Bot ${actions[action]}成功！`);
+                    const result = await response.text();
+                    if (action === 'stop') {
+                        alert(`Bot 已停止！\n${result}`);
+                    } else {
+                        alert(`Bot ${actions[action]}成功！`);
+                    }
                     // Refresh bot status after 1 second
                     setTimeout(updateBotStatus, 1000);
                 } else {

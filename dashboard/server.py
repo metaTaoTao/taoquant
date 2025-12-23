@@ -515,14 +515,65 @@ def api_bot_status(request: Request) -> Dict[str, Any]:
     return _systemctl_is_active()
 
 
+def _cancel_all_orders() -> Dict[str, Any]:
+    """Cancel all bot orders on Bitget before stopping."""
+    try:
+        # Read config to get symbol
+        cfg = _read_json(Path(_env("TAOQUANT_CONFIG_FILE", str(BASE_DIR / "config_bitget_live.json"))))
+        symbol = cfg.get("symbol", "BTCUSDT") if cfg else "BTCUSDT"
+        market_type = cfg.get("execution", {}).get("market_type", "swap") if cfg else "swap"
+        
+        # Get API credentials from environment
+        api_key = os.getenv("BITGET_API_KEY", "")
+        api_secret = os.getenv("BITGET_API_SECRET", "")
+        passphrase = os.getenv("BITGET_PASSPHRASE", "")
+        
+        if not api_key or not api_secret or not passphrase:
+            return {"ok": False, "error": "Missing Bitget API credentials"}
+        
+        # Initialize execution engine
+        from execution.engines.bitget_engine import BitgetExecutionEngine
+        engine = BitgetExecutionEngine(
+            api_key=api_key,
+            api_secret=api_secret,
+            passphrase=passphrase,
+            market_type=market_type,
+            debug=False,
+        )
+        
+        # Cancel all orders with TaoGrid prefix
+        cancelled = engine.cancel_all_orders(symbol, client_oid_prefix="tg_")
+        
+        return {"ok": True, "cancelled": cancelled, "symbol": symbol}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/bot/cancel-orders", response_class=PlainTextResponse)
+def api_bot_cancel_orders(request: Request) -> str:
+    """Cancel all bot orders without stopping the bot."""
+    _require_control(request)
+    result = _cancel_all_orders()
+    if not result["ok"]:
+        raise HTTPException(status_code=500, detail=result)
+    return f"Cancelled {result.get('cancelled', 0)} orders"
+
+
 @app.post("/api/bot/stop", response_class=PlainTextResponse)
 def api_bot_stop(request: Request) -> str:
     _require_control(request)
     _require_systemctl()
+    
+    # First, cancel all orders before stopping
+    cancel_result = _cancel_all_orders()
+    # Log but don't fail if cancel fails (bot might already be stopped)
+    
     r = _systemctl("stop")
     if not r["ok"]:
         raise HTTPException(status_code=500, detail=r)
-    return "ok"
+    
+    cancelled = cancel_result.get("cancelled", 0) if cancel_result.get("ok") else 0
+    return f"ok (cancelled {cancelled} orders)"
 
 
 @app.post("/api/bot/start", response_class=PlainTextResponse)
