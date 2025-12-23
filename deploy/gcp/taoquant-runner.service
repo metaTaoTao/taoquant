@@ -1,0 +1,43 @@
+[Unit]
+Description=TaoQuant Grid Trading Runner (Bitget Live)
+After=network.target
+
+[Service]
+Type=simple
+User=taoquant
+Group=taoquant
+WorkingDirectory=/opt/taoquant
+Environment="PATH=/opt/taoquant/.venv/bin:/usr/local/bin:/usr/bin:/bin"
+EnvironmentFile=/opt/taoquant/.env
+
+# Main command
+# Note: API credentials are read from environment variables (BITGET_API_KEY, etc.)
+# This is LIVE mode (no --dry-run flag)
+ExecStart=/opt/taoquant/.venv/bin/python algorithms/taogrid/run_bitget_live.py \
+    --symbol BTCUSDT \
+    --config-file config_bitget_live.json \
+    --enable-dashboard \
+    --api-key ${BITGET_API_KEY} \
+    --api-secret ${BITGET_API_SECRET} \
+    --passphrase ${BITGET_PASSPHRASE} \
+    ${BITGET_SUBACCOUNT_UID:+--subaccount-uid ${BITGET_SUBACCOUNT_UID}} \
+    --log-dir logs/bitget_live
+
+# Restart policy
+Restart=always
+RestartSec=10
+StartLimitInterval=300
+StartLimitBurst=5
+
+# Resource limits
+LimitNOFILE=65536
+MemoryMax=2G
+CPUQuota=200%
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=taoquant-runner
+
+[Install]
+WantedBy=multi-user.target

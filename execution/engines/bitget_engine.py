@@ -311,6 +311,50 @@ class BitgetExecutionEngine:
                 cancelled += 1
         return cancelled
 
+    def get_my_trades(
+        self,
+        symbol: str,
+        since_ms: Optional[int] = None,
+        limit: int = 200,
+    ) -> List[Dict[str, Any]]:
+        """
+        Fetch user trades (fills) via CCXT.
+
+        This is used for downtime replay / accounting. Best-effort.
+        """
+        try:
+            ccxt_symbol = self._convert_symbol(symbol)
+            raw = self.exchange.fetch_my_trades(ccxt_symbol, since=since_ms, limit=int(limit))
+            out: List[Dict[str, Any]] = []
+            for t in raw or []:
+                fee = t.get("fee") or {}
+                out.append(
+                    {
+                        "trade_id": str(t.get("id") or ""),
+                        "order_id": str(t.get("order") or ""),
+                        "client_order_id": str(
+                            (t.get("clientOrderId") or "")
+                            or (t.get("clientOid") or "")
+                            or (t.get("info", {}) or {}).get("clientOid")
+                            or ""
+                        ),
+                        "symbol": str(t.get("symbol") or ""),
+                        "side": str(t.get("side") or ""),
+                        "price": float(t.get("price") or 0.0),
+                        "qty": float(t.get("amount") or 0.0),
+                        "cost": float(t.get("cost") or 0.0),
+                        "fee": float(fee.get("cost") or 0.0) if isinstance(fee, dict) else 0.0,
+                        "fee_currency": str(fee.get("currency") or "") if isinstance(fee, dict) else "",
+                        "timestamp_ms": int(t.get("timestamp") or 0),
+                        "raw": t,
+                    }
+                )
+            return out
+        except Exception as e:
+            if self.debug:
+                print(f"[Bitget CCXT Engine] Error fetching my trades: {e}")
+            return []
+
     def get_account_balance(self) -> Dict[str, Any]:
         """
         Get account balance.

@@ -1,0 +1,36 @@
+[Unit]
+Description=TaoQuant Live Trading Dashboard
+After=network.target
+
+[Service]
+Type=simple
+User=taoquant
+Group=taoquant
+WorkingDirectory=/opt/taoquant
+Environment="PATH=/opt/taoquant/.venv/bin:/usr/local/bin:/usr/bin:/bin"
+EnvironmentFile=/opt/taoquant/.env
+
+# Main command
+ExecStart=/opt/taoquant/.venv/bin/python -m uvicorn dashboard.server:app \
+    --host 0.0.0.0 \
+    --port 8000 \
+    --workers 2
+
+# Restart policy
+Restart=always
+RestartSec=5
+StartLimitInterval=60
+StartLimitBurst=3
+
+# Resource limits
+LimitNOFILE=65536
+MemoryMax=512M
+CPUQuota=100%
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=taoquant-dashboard
+
+[Install]
+WantedBy=multi-user.target

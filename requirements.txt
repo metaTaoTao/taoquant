@@ -26,6 +26,9 @@ ipykernel>=6.0
 fastapi>=0.111.0
 uvicorn[standard]>=0.30.0
 
+# Persistence (PostgreSQL)
+psycopg[binary,pool]>=3.2.0
+
 # Optional technical indicators (install if available on platform)
 TA-Lib>=0.4.26; platform_system != "Windows" or platform_machine != "ARM64"
 

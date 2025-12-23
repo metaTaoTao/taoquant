@@ -14,6 +14,11 @@ from fastapi.templating import Jinja2Templates
 
 from dashboard.services.market_data_service import enrich_status_with_market_24h
 
+try:
+    from persistence.db import PostgresStore
+except Exception:  # pragma: no cover
+    PostgresStore = None  # type: ignore[assignment]
+
 
 def _env(name: str, default: str) -> str:
     v = os.getenv(name)
@@ -30,6 +35,15 @@ SERVICE_NAME = _env("TAOQUANT_SERVICE_NAME", "taoquant.service")
 TOKEN = os.getenv("TAOQUANT_DASHBOARD_TOKEN")  # if set, all endpoints require Bearer token
 ENABLE_CONTROL = _env("TAOQUANT_ENABLE_CONTROL", "0").strip().lower() in ("1", "true", "yes")
 MARKET_BARS_FILE = Path(_env("TAOQUANT_MARKET_BARS_FILE", str(STATE_DIR / "market_bars_1m.jsonl"))).resolve()
+DEFAULT_BOT_ID = _env("TAOQUANT_BOT_ID", "")
+
+# Optional DB (best-effort)
+_DB = None
+try:
+    if PostgresStore is not None:
+        _DB = PostgresStore.from_env()
+except Exception:
+    _DB = None
 
 
 def _now_iso() -> str:
@@ -123,6 +137,52 @@ def _read_json(path: Path) -> Dict[str, Any]:
         return json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return {}
+
+def _parse_ts(ts: Any) -> Optional[datetime]:
+    if not ts:
+        return None
+    try:
+        s = str(ts).replace("Z", "+00:00")
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+def _apply_offline_status(
+    st: Dict[str, Any],
+    *,
+    heartbeat_ts: Optional[datetime],
+    lag_seconds: Optional[float],
+    exchange_api_status: Optional[str],
+) -> Dict[str, Any]:
+    """
+    Fill `system.bot_status` with layered states:
+    - RUNNER_DOWN
+    - DATA_FEED_STALE
+    - EXCHANGE_API_DEGRADED
+    - RUNNING
+    """
+    now = datetime.now(timezone.utc)
+    hb_age = (now - heartbeat_ts).total_seconds() if heartbeat_ts else None
+    bot_status = "RUNNING"
+    if hb_age is None or hb_age > 120:
+        bot_status = "RUNNER_DOWN"
+    elif lag_seconds is not None and lag_seconds > 90:
+        bot_status = "DATA_FEED_STALE"
+    elif (exchange_api_status or "").upper() in ("DEGRADED", "ERROR"):
+        bot_status = "EXCHANGE_API_DEGRADED"
+
+    sys_obj = st.get("system")
+    if not isinstance(sys_obj, dict):
+        sys_obj = {}
+    sys_obj["bot_status"] = bot_status
+    if heartbeat_ts:
+        sys_obj["last_heartbeat"] = heartbeat_ts.isoformat()
+        sys_obj["actual_last_bar_seconds_ago"] = hb_age if hb_age is not None else 0
+    st["system"] = sys_obj
+    return st
 
 
 def _atomic_write_text(path: Path, content: str) -> None:
@@ -363,13 +423,37 @@ def home_legacy() -> str:
 
 
 @app.get("/api/status")
-def api_status(request: Request) -> Dict[str, Any]:
+def api_status(request: Request, bot_id: Optional[str] = None) -> Dict[str, Any]:
     _require_auth(request)
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     CONFIG_VERSIONS_DIR.mkdir(parents=True, exist_ok=True)
-    st = _read_json(STATUS_FILE)
+
+    bot_id_final = (bot_id or DEFAULT_BOT_ID or "").strip()
+    st: Dict[str, Any] = {}
+
+    # Prefer DB (if configured), fallback to file
+    if _DB is not None and bot_id_final:
+        try:
+            row = _DB.get_latest_state(bot_id=bot_id_final)
+            if row and isinstance(row.get("payload"), dict):
+                st = row["payload"]
+            hb = _DB.get_latest_heartbeat(bot_id=bot_id_final)
+            hb_ts = _parse_ts(hb.get("ts")) if isinstance(hb, dict) else None
+            lag = None
+            try:
+                lag = float(hb.get("lag_seconds")) if isinstance(hb, dict) and hb.get("lag_seconds") is not None else None
+            except Exception:
+                lag = None
+            ex_api = str(hb.get("exchange_api_status")) if isinstance(hb, dict) else None
+            if st:
+                st = _apply_offline_status(st, heartbeat_ts=hb_ts, lag_seconds=lag, exchange_api_status=ex_api)
+        except Exception:
+            st = {}
+
     if not st:
-        return {"ts": _now_iso(), "note": "status file not found yet", "status_file": str(STATUS_FILE)}
+        st = _read_json(STATUS_FILE)
+        if not st:
+            return {"ts": _now_iso(), "note": "status file not found yet", "status_file": str(STATUS_FILE)}
 
     # Enrich market 24h stats in a clean service (runner only emits raw 1m bars).
     try:

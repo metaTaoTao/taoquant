@@ -119,6 +119,16 @@ def load_config_from_file(config_file: str) -> tuple[TaoGridLeanConfig, dict]:
         "abnormal_buy_notional_frac_equity": float(execution_config.get("abnormal_buy_notional_frac_equity", 0.0)),
         "abnormal_range_mult_spacing": float(execution_config.get("abnormal_range_mult_spacing", 0.0)),
         "cooldown_active_buy_levels": int(execution_config.get("cooldown_active_buy_levels", 0)),
+        # Execution safety fuses (infra hard-gates)
+        "safety_max_orders_per_min": int(execution_config.get("safety_max_orders_per_min", 30)),
+        "safety_max_cancels_per_min": int(execution_config.get("safety_max_cancels_per_min", 60)),
+        # Cap added notional per minute as a fraction of equity (e.g., 0.30 => 30% equity/min)
+        "safety_max_notional_add_frac_equity_per_min": float(
+            execution_config.get("safety_max_notional_add_frac_equity_per_min", 0.30)
+        ),
+        "safety_data_stale_seconds": int(execution_config.get("safety_data_stale_seconds", 90)),
+        "safety_exchange_degrade_errors": int(execution_config.get("safety_exchange_degrade_errors", 3)),
+        "safety_kill_switch_file": str(execution_config.get("safety_kill_switch_file", "state/kill_switch")),
     }
     return config, exec_cfg
 

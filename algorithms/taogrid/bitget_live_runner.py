@@ -10,11 +10,18 @@ import sys
 import time
 import json
 import math
+import os
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any
 
 import pandas as pd
+
+# Optional DB persistence (best-effort; never required for trading loop)
+try:
+    from persistence.db import PostgresStore
+except Exception:  # pragma: no cover
+    PostgresStore = None  # type: ignore[assignment]
 
 # Add project root to path
 project_root = Path(__file__).parent.parent.parent
@@ -95,6 +102,29 @@ class BitgetLiveRunner:
         self._buy_fills_this_bar: int = 0
         self._buy_notional_added_this_bar: float = 0.0
 
+        # ====================================================================
+        # Execution safety fuses (infra hard-gates)
+        # ====================================================================
+        self.safety_max_orders_per_min = max(0, int(self.execution_model.get("safety_max_orders_per_min", 30)))
+        self.safety_max_cancels_per_min = max(0, int(self.execution_model.get("safety_max_cancels_per_min", 60)))
+        self.safety_max_notional_add_frac_equity_per_min = float(
+            self.execution_model.get("safety_max_notional_add_frac_equity_per_min", 0.30)
+        )
+        self.safety_data_stale_seconds = max(0, int(self.execution_model.get("safety_data_stale_seconds", 90)))
+        self.safety_exchange_degrade_errors = max(0, int(self.execution_model.get("safety_exchange_degrade_errors", 3)))
+
+        ks = str(self.execution_model.get("safety_kill_switch_file", "state/kill_switch") or "state/kill_switch")
+        p = Path(ks)
+        if not p.is_absolute():
+            base = Path(getattr(self.config, "state_dir", "state"))
+            p = base / p
+        self.safety_kill_switch_file: Path = p
+
+        self._safety_window_start: datetime | None = None
+        self._safety_orders_count: int = 0
+        self._safety_cancels_count: int = 0
+        self._safety_notional_added: float = 0.0
+
         # Paper portfolio state (used only when dry_run + simulate_fills_in_dry_run)
         self._paper_cash: float = float(getattr(self.config, "initial_cash", 0.0))
         self._paper_long_holdings: float = 0.0
@@ -158,6 +188,22 @@ class BitgetLiveRunner:
         base = Path(getattr(self.config, "state_dir", "state"))
         self._market_bars_file: Path = base / "market_bars_1m.jsonl"
         self._last_market_bar_ts: datetime | None = None
+        # DB outbox (when DB is down, buffer payloads here for replay)
+        self._db_outbox_file: Path = base / "db_outbox.jsonl"
+        # Latest planned grid limit orders (computed in _sync_exchange_orders each bar)
+        self._last_planned_limit_orders: list[dict] = []
+        self._last_planned_limit_orders_ts: datetime | None = None
+
+        # DB persistence store (optional)
+        self._db_store = None
+        try:
+            if PostgresStore is not None:
+                self._db_store = PostgresStore.from_env()
+        except Exception:
+            self._db_store = None
+        # Lightweight health counters for dashboard diagnostics
+        self._consecutive_loop_errors: int = 0
+        self._last_loop_error_ts: datetime | None = None
 
         # Initialize strategy
         self._initialize_strategy()
@@ -418,20 +464,64 @@ class BitgetLiveRunner:
         except Exception:
             pass
 
-        cancelled = self.execution_engine.cancel_all_orders(
-            symbol=self.symbol,
-            client_oid_prefix=self._client_oid_prefix,
-        )
-        if cancelled > 0:
-            self.logger.log_info(
-                f"Cancelled {cancelled} previous TaoGrid orders (prefix={self._client_oid_prefix})"
+        # Cancel all existing bot orders (with convergence loop to handle race conditions).
+        try:
+            cancelled = self.execution_engine.cancel_all_orders(
+                symbol=self.symbol,
+                client_oid_prefix=self._client_oid_prefix,
             )
+            total_cancelled = int(cancelled or 0)
+
+            # Converge: cancel -> refetch -> retry (handles "filled while cancelling" / residuals).
+            max_rounds = 5
+            remaining = []
+            for _ in range(max_rounds):
+                open_orders = self.execution_engine.get_open_orders(self.symbol) or []
+                bot_orders = [
+                    oo for oo in open_orders
+                    if str(oo.get("client_order_id") or "").startswith(self._client_oid_prefix)
+                ]
+                remaining = bot_orders
+                if not bot_orders:
+                    break
+                for oo in bot_orders:
+                    oid = str(oo.get("order_id") or "")
+                    if not oid:
+                        continue
+                    try:
+                        self.execution_engine.cancel_order(self.symbol, oid)
+                        total_cancelled += 1
+                    except Exception:
+                        continue
+                time.sleep(1)
+
+            if total_cancelled > 0:
+                self.logger.log_info(
+                    f"Cancelled {total_cancelled} previous TaoGrid orders (prefix={self._client_oid_prefix})"
+                )
+            if remaining:
+                self.logger.log_warning(
+                    f"[BOOTSTRAP] Residual bot open orders remain after retries: {len(remaining)} "
+                    f"(prefix={self._client_oid_prefix}). Will continue and rely on sync loop."
+                )
+        except Exception:
+            pass
 
         # Seed internal ledger from current exchange holdings (restart-safe baseline).
         try:
             latest = self.data_source.get_latest_bar(self.symbol, "1m")
             last_px = float(latest["close"]) if latest else float(self.config.support)
             positions = self.execution_engine.get_positions(self.symbol)
+            # Best-effort: persist positions snapshot immediately
+            try:
+                if self._db_store is not None:
+                    self._db_store.upsert_exchange_positions_current(
+                        bot_id=self._bot_id(),
+                        ts=datetime.now(timezone.utc),
+                        rows=positions or [],
+                    )
+            except Exception:
+                pass
             exch_long = 0.0
             exch_short = 0.0
             for pos in positions:
@@ -486,8 +576,115 @@ class BitgetLiveRunner:
         except Exception as e:
             self.logger.log_warning(f"[BOOTSTRAP] Failed to seed holdings into ledger: {e}")
 
+        # Best-effort: replay fills since last seen cursor (implemented later)
+        try:
+            self._replay_fills_best_effort()
+        except Exception:
+            pass
+
         # Place initial grid orders
         self._sync_exchange_orders(current_price=None)
+
+    def _replay_fills_best_effort(self) -> None:
+        """
+        Trade/fill replay (idempotent) to reconcile downtime.
+
+        - Only runs in live mode
+        - Filters to bot orders by client_oid_prefix
+        - Persists to DB `trade_fills` + updates `replay_cursor`
+        """
+        if bool(self.dry_run) or self._db_store is None:
+            return
+
+        # Determine replay window
+        bot_id = self._bot_id()
+        cursor = None
+        try:
+            cursor = self._db_store.get_replay_cursor(bot_id=bot_id)
+        except Exception:
+            cursor = None
+
+        last_seen_ts = None
+        if isinstance(cursor, dict):
+            last_seen_ts = cursor.get("last_seen_ts")
+
+        since_ms = None
+        try:
+            if isinstance(last_seen_ts, datetime):
+                # rewind a bit to tolerate clock skew / exchange pagination; dedupe via unique keys
+                since_ms = int((last_seen_ts - timedelta(minutes=5)).timestamp() * 1000)
+        except Exception:
+            since_ms = None
+
+        trades = []
+        try:
+            trades = self.execution_engine.get_my_trades(self.symbol, since_ms=since_ms, limit=200) or []
+        except Exception:
+            trades = []
+
+        if not trades:
+            return
+
+        prefix = str(self._client_oid_prefix or "")
+        fills_rows: list[dict] = []
+        max_ts: datetime | None = None
+        max_trade_id: str | None = None
+
+        for t in trades:
+            try:
+                client_oid = str(t.get("client_order_id") or "")
+                if prefix and not client_oid.startswith(prefix):
+                    continue
+
+                ts_ms = int(t.get("timestamp_ms") or 0)
+                if ts_ms <= 0:
+                    continue
+                ts = datetime.fromtimestamp(ts_ms / 1000.0, tz=timezone.utc)
+
+                trade_id = str(t.get("trade_id") or "") or None
+                order_id = str(t.get("order_id") or "") or None
+                side = str(t.get("side") or "").lower()
+
+                fills_rows.append(
+                    {
+                        "ts": ts,
+                        "trade_id": trade_id,
+                        "exchange_order_id": order_id,
+                        "client_order_id": client_oid,
+                        "side": side,
+                        "price": float(t.get("price") or 0.0),
+                        "qty": float(t.get("qty") or 0.0),
+                        "fee": float(t.get("fee") or 0.0),
+                        "fee_currency": str(t.get("fee_currency") or ""),
+                        "raw": t.get("raw"),
+                    }
+                )
+
+                if max_ts is None or ts > max_ts:
+                    max_ts = ts
+                    max_trade_id = trade_id
+            except Exception:
+                continue
+
+        if not fills_rows:
+            return
+
+        # Persist fills (idempotent on trade_id when available)
+        try:
+            self._db_store.insert_trade_fills(bot_id=bot_id, rows=fills_rows)
+        except Exception:
+            pass
+
+        # Advance replay cursor
+        try:
+            if max_ts is not None:
+                self._db_store.upsert_replay_cursor(
+                    bot_id=bot_id,
+                    last_seen_trade_id=max_trade_id,
+                    last_seen_ts=max_ts,
+                )
+        except Exception:
+            pass
 
     def _compute_factors(self, bars: pd.DataFrame) -> pd.DataFrame:
         """Compute the same factor columns as simple_lean_runner (rolling window)."""
@@ -979,6 +1176,65 @@ class BitgetLiveRunner:
             if not o["placed"]:
                 o["triggered"] = False
 
+    # ====================================================================
+    # Execution safety fuses (infra hard-gates)
+    # ====================================================================
+    def _safety_roll_window(self, now: datetime) -> None:
+        w = now.replace(second=0, microsecond=0)
+        if self._safety_window_start is None or w > self._safety_window_start:
+            self._safety_window_start = w
+            self._safety_orders_count = 0
+            self._safety_cancels_count = 0
+            self._safety_notional_added = 0.0
+
+    def _safety_is_kill_switch_on(self) -> bool:
+        if str(os.getenv("TAOQUANT_KILL_SWITCH", "")).strip().lower() in ("1", "true", "yes"):
+            return True
+        try:
+            return bool(self.safety_kill_switch_file.exists())
+        except Exception:
+            return False
+
+    def _safety_should_degrade(self, *, bar_timestamp: datetime) -> tuple[bool, str]:
+        """
+        Return (degrade, reason). When degraded: allow cancels, deny new placements.
+        """
+        # Data stale => no new orders
+        try:
+            lag = (datetime.now(timezone.utc) - bar_timestamp).total_seconds()
+            if self.safety_data_stale_seconds > 0 and lag > float(self.safety_data_stale_seconds):
+                return True, f"DATA_FEED_STALE(lag={lag:.0f}s)"
+        except Exception:
+            pass
+
+        # Exchange errors => degrade
+        if self.safety_exchange_degrade_errors > 0 and int(self._consecutive_loop_errors) >= int(self.safety_exchange_degrade_errors):
+            return True, f"EXCHANGE_API_DEGRADED(errors={int(self._consecutive_loop_errors)})"
+
+        return False, ""
+
+    def _safety_can_cancel(self, *, now: datetime) -> bool:
+        self._safety_roll_window(now)
+        if self.safety_max_cancels_per_min <= 0:
+            return True
+        return self._safety_cancels_count < int(self.safety_max_cancels_per_min)
+
+    def _safety_mark_cancel(self) -> None:
+        self._safety_cancels_count += 1
+
+    def _safety_can_place(self, *, now: datetime, notional: float, equity: float) -> bool:
+        self._safety_roll_window(now)
+        if self.safety_max_orders_per_min > 0 and self._safety_orders_count >= int(self.safety_max_orders_per_min):
+            return False
+        cap = float(equity) * float(self.safety_max_notional_add_frac_equity_per_min)
+        if cap > 0 and (self._safety_notional_added + float(notional)) > cap:
+            return False
+        return True
+
+    def _safety_mark_place(self, *, notional: float) -> None:
+        self._safety_orders_count += 1
+        self._safety_notional_added += float(notional)
+
     def _sync_exchange_orders(self, current_price: Optional[float], current_time: Optional[datetime] = None) -> None:
         """
         Sync algorithm.pending_limit_orders -> exchange open orders.
@@ -1079,6 +1335,13 @@ class BitgetLiveRunner:
                 }
             )
 
+        # Expose latest planned active limit orders for dashboard (dry-run + live).
+        # NOTE: "planned" already accounts for:
+        # - active_buy_levels filter (via placed flags)
+        # - immediate-cross eligibility around current price
+        self._last_planned_limit_orders = list(planned)
+        self._last_planned_limit_orders_ts = current_time or datetime.now(timezone.utc)
+
         # Dry-run preview: log a compact order summary periodically
         if self.dry_run:
             if int(getattr(self, "_bar_index", 0) or 0) % 5 == 0:
@@ -1101,6 +1364,25 @@ class BitgetLiveRunner:
             return
 
         # === Real exchange sync below (non-dry-run) ===
+        now_ts = datetime.now(timezone.utc)
+        bar_ts = current_time or now_ts
+
+        # Kill switch: cancel bot orders and do nothing else.
+        if self._safety_is_kill_switch_on():
+            try:
+                self.execution_engine.cancel_all_orders(self.symbol, client_oid_prefix=self._client_oid_prefix)
+            except Exception:
+                pass
+            self.logger.log_warning("[KILL_SWITCH] enabled -> cancelled bot orders, skip placements.")
+            return
+
+        degrade, degrade_reason = self._safety_should_degrade(bar_timestamp=bar_ts)
+        allow_place = not degrade
+        if degrade:
+            self.logger.log_warning(f"[SAFETY_DEGRADE] {degrade_reason} -> cancel-only mode (no new orders).")
+
+        equity_for_limits = float(ps.get("equity", self.config.initial_cash) or self.config.initial_cash)
+
         open_orders = self.execution_engine.get_open_orders(self.symbol)
         open_by_client: Dict[str, dict] = {}
         for oo in open_orders:
@@ -1122,9 +1404,16 @@ class BitgetLiveRunner:
             if k not in desired:
                 oid = str(oo.get("order_id") or "")
                 if oid:
-                    self.execution_engine.cancel_order(self.symbol, oid)
+                    if self._safety_can_cancel(now=now_ts):
+                        self.execution_engine.cancel_order(self.symbol, oid)
+                        self._safety_mark_cancel()
+                    else:
+                        self.logger.log_warning("[SAFETY] cancel rate limited; skip further cancels this minute.")
+                        break
 
         for o in planned:
+            if not allow_place:
+                break
             direction = str(o.get("direction"))
             level_index = int(o.get("level_index"))
             price = float(o.get("price"))
@@ -1139,7 +1428,21 @@ class BitgetLiveRunner:
                     continue
                 oid = str(oo.get("order_id") or "")
                 if oid:
-                    self.execution_engine.cancel_order(self.symbol, oid)
+                    if self._safety_can_cancel(now=now_ts):
+                        self.execution_engine.cancel_order(self.symbol, oid)
+                        self._safety_mark_cancel()
+                    else:
+                        self.logger.log_warning("[SAFETY] cancel rate limited; skip replace cancels this minute.")
+                        continue
+
+            notional = float(qty) * float(price)
+            if not self._safety_can_place(now=now_ts, notional=notional, equity=equity_for_limits):
+                self.logger.log_warning(
+                    "[SAFETY] place limited; skip new orders this minute "
+                    f"(orders={self._safety_orders_count}, cancels={self._safety_cancels_count}, "
+                    f"notional_added={self._safety_notional_added:.2f})."
+                )
+                break
 
             # Derivatives position semantics:
             # - For long grid SELL (leg=None): reduceOnly=True (close/reduce long)
@@ -1167,6 +1470,7 @@ class BitgetLiveRunner:
                 params=params or None,
             )
             if r and r.get("order_id"):
+                self._safety_mark_place(notional=notional)
                 oid = str(r["order_id"])
                 self.pending_orders[oid] = {
                     "side": direction,
@@ -1212,6 +1516,8 @@ class BitgetLiveRunner:
                     self.last_bar_timestamp = bar_timestamp
                     self._bar_index += 1
                     self.algorithm._current_bar_index = self._bar_index
+                    # Fresh bar received => clear loop error streak
+                    self._consecutive_loop_errors = 0
                     # Reset execution counters for this bar
                     self._fills_this_bar = 0
                     self._buy_fills_this_bar = 0
@@ -1564,7 +1870,15 @@ class BitgetLiveRunner:
                     )
 
                     # Update live_status.json for dashboard
-                    self._update_live_status(latest_bar, bar_timestamp)
+                    status_payload = self._update_live_status(latest_bar, bar_timestamp)
+                    # Best-effort: persist to DB (even if dashboard status writing is disabled)
+                    if not isinstance(status_payload, dict) and self._db_store is not None:
+                        try:
+                            status_payload = self._build_live_status_dict(latest_bar, bar_timestamp)
+                        except Exception:
+                            status_payload = None
+                    if isinstance(status_payload, dict):
+                        self._persist_status_to_db(status=status_payload, bar_timestamp=bar_timestamp)
 
                     # Wait for next minute
                     # Calculate sleep time to align with minute boundary
@@ -1579,6 +1893,8 @@ class BitgetLiveRunner:
                     break
                 except Exception as e:
                     self.logger.log_error(f"Error in main loop: {e}", exc_info=True)
+                    self._consecutive_loop_errors += 1
+                    self._last_loop_error_ts = datetime.now(timezone.utc)
                     time.sleep(10)  # Wait before retrying
 
         except Exception as e:
@@ -1793,6 +2109,29 @@ class BitgetLiveRunner:
             except Exception:
                 continue
 
+        # Active limit orders (planned grid orders currently enabled for placement)
+        active_orders: list[dict] = []
+        try:
+            for o in (self._last_planned_limit_orders or [])[:400]:
+                direction = str(o.get("direction", "")).lower()
+                level_index = int(o.get("level_index", 0) or 0)
+                leg = o.get("leg")
+                client_oid = self._make_client_oid(direction, level_index, leg)
+                active_orders.append(
+                    {
+                        "direction": direction,
+                        "level": int(level_index) + 1,
+                        "price": float(o.get("price", 0.0) or 0.0),
+                        "size": float(o.get("quantity", 0.0) or 0.0),
+                        "leg": (leg if leg is not None else "long"),
+                        "client_order_id": client_oid,
+                        "reason": o.get("reason"),
+                        "ts": pd.Timestamp(self._last_planned_limit_orders_ts or timestamp).tz_convert("UTC").isoformat(),
+                    }
+                )
+        except Exception:
+            active_orders = []
+
         return {
             "ts": ts_iso,
             "mode": "dryrun" if bool(self.dry_run) else "live",
@@ -1891,6 +2230,7 @@ class BitgetLiveRunner:
                 "uptime_seconds": uptime_seconds,
             },
             "orders": orders,
+            "active_orders": active_orders,
             "risk_log": [],
             "performance": {},
             "system": {
@@ -1912,14 +2252,188 @@ class BitgetLiveRunner:
             },
         }
 
-    def _update_live_status(self, current_bar: dict, timestamp: datetime) -> None:
-        """Conditionally update live_status.json based on frequency."""
+    def _update_live_status(self, current_bar: dict, timestamp: datetime) -> dict | None:
+        """Conditionally update live_status.json based on frequency. Returns payload if written."""
         if not self.enable_live_status or self.live_status_file is None:
-            return
+            return None
 
         self._live_status_update_counter += 1
         if self._live_status_update_counter % self.live_status_update_frequency != 0:
-            return
+            return None
 
         status = self._build_live_status_dict(current_bar, timestamp)
         self._atomic_write_json(self.live_status_file, status)
+        return status
+
+    def _bot_id(self) -> str:
+        return f"{str(self.symbol)}_{str(self.market_type)}"
+
+    def _persist_status_to_db(self, *, status: dict, bar_timestamp: datetime) -> None:
+        """
+        Best-effort DB persistence. Never raises.
+
+        Writes:
+        - bot_state_current (jsonb snapshot)
+        - bot_heartbeat (append-only)
+        - active_limit_orders_current (replace per bar)
+        - order_blotter (append-only; duplicates ignored)
+        - exchange_open_orders_current / exchange_positions_current (live only; best-effort)
+        """
+        if self._db_store is None:
+            return
+        try:
+            self._persist_status_to_db_core(status=status, bar_timestamp=bar_timestamp)
+            # If DB recovered, try flushing backlog
+            self._db_outbox_flush(max_events=50)
+        except Exception:
+            self._db_outbox_append(status=status, bar_timestamp=bar_timestamp)
+            return
+
+    def _persist_status_to_db_core(self, *, status: dict, bar_timestamp: datetime) -> None:
+        """Core DB write. Raises on failure (caller handles buffering)."""
+        if self._db_store is None:
+            raise RuntimeError("db_store is None")
+
+        now_ts = datetime.now(timezone.utc)
+        bot_id = self._bot_id()
+        mode = str(status.get("mode") or ("dryrun" if bool(self.dry_run) else "live"))
+
+        # Data feed lag
+        lag_seconds = None
+        try:
+            lag_seconds = float((now_ts - bar_timestamp).total_seconds())
+        except Exception:
+            lag_seconds = None
+
+        data_feed_status = "CONNECTED"
+        if lag_seconds is not None and lag_seconds > float(self.safety_data_stale_seconds or 90):
+            data_feed_status = "STALE"
+
+        exchange_api_status = "CONNECTED" if int(self._consecutive_loop_errors) == 0 else "DEGRADED"
+
+        # Derive a single status label for heartbeat
+        hb_status = "RUNNING"
+        if data_feed_status == "STALE":
+            hb_status = "DATA_FEED_STALE"
+        elif exchange_api_status != "CONNECTED":
+            hb_status = "EXCHANGE_API_DEGRADED"
+
+        safe_status = self._sanitize_jsonable(status)
+
+        # Upsert current state snapshot
+        self._db_store.upsert_bot_state_current(
+            bot_id=bot_id,
+            ts=now_ts,
+            mode=mode,
+            payload=safe_status,
+        )
+
+        # Insert heartbeat
+        self._db_store.insert_heartbeat(
+            bot_id=bot_id,
+            ts=now_ts,
+            mode=mode,
+            last_bar_ts=bar_timestamp,
+            lag_seconds=lag_seconds,
+            status=hb_status,
+            data_feed_status=data_feed_status,
+            exchange_api_status=exchange_api_status,
+            exchange_error_count=int(self._consecutive_loop_errors),
+            payload={
+                "symbol": str(self.symbol),
+                "market_type": str(self.market_type),
+            },
+        )
+
+        # Active limit orders (planned)
+        active = list(safe_status.get("active_orders") or [])
+        self._db_store.replace_active_limit_orders_current(bot_id=bot_id, ts=now_ts, orders=active)
+
+        # Blotter orders (filled)
+        blotter_rows: list[dict] = []
+        for o in list(safe_status.get("orders") or []):
+            try:
+                blotter_rows.append(
+                    {
+                        "timestamp": o.get("timestamp"),
+                        "direction": o.get("direction"),
+                        "level": o.get("level"),
+                        "price": o.get("price"),
+                        "size": o.get("size"),
+                        "notional": o.get("notional"),
+                        "commission": o.get("commission"),
+                        "leg": o.get("leg"),
+                        "client_order_id": o.get("client_order_id") or o.get("id"),
+                        "exchange_order_id": o.get("exchange_order_id"),
+                        "trade_id": o.get("trade_id"),
+                    }
+                )
+            except Exception:
+                continue
+        if blotter_rows:
+            self._db_store.insert_order_blotter(bot_id=bot_id, rows=blotter_rows)
+
+        # Live: snapshot exchange open orders & positions
+        if not bool(self.dry_run):
+            open_orders = self.execution_engine.get_open_orders(self.symbol)
+            self._db_store.upsert_exchange_open_orders_current(bot_id=bot_id, ts=now_ts, rows=open_orders or [])
+            positions = self.execution_engine.get_positions(self.symbol)
+            self._db_store.upsert_exchange_positions_current(bot_id=bot_id, ts=now_ts, rows=positions or [])
+
+    def _db_outbox_append(self, *, status: dict, bar_timestamp: datetime) -> None:
+        """Append a buffered payload to outbox when DB is down (best-effort)."""
+        try:
+            base = Path(getattr(self.config, "state_dir", "state"))
+            base.mkdir(parents=True, exist_ok=True)
+            path = self._db_outbox_file
+            rec = {
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "bar_timestamp": pd.Timestamp(bar_timestamp).tz_convert("UTC").isoformat(),
+                "status": self._sanitize_jsonable(status),
+            }
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        except Exception:
+            return
+
+    def _db_outbox_flush(self, *, max_events: int = 50) -> None:
+        """Flush buffered outbox events back to DB, removing successes from the file."""
+        if self._db_store is None:
+            return
+        try:
+            path = self._db_outbox_file
+            if not path.exists():
+                return
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+            if not lines:
+                return
+            remain: list[str] = []
+            processed = 0
+            for i, raw_ln in enumerate(lines):
+                if processed >= int(max_events):
+                    remain.append(raw_ln)
+                    continue
+                ln = raw_ln.strip()
+                if not ln:
+                    continue
+                try:
+                    rec = json.loads(ln)
+                    status = rec.get("status")
+                    bar_ts = rec.get("bar_timestamp")
+                    bar_dt = pd.Timestamp(bar_ts).to_pydatetime() if bar_ts else datetime.now(timezone.utc)
+                    if isinstance(status, dict):
+                        self._persist_status_to_db_core(status=status, bar_timestamp=bar_dt)
+                        processed += 1
+                    else:
+                        processed += 1
+                except Exception:
+                    # Stop on first failure to avoid dropping events
+                    remain.append(raw_ln)
+                    remain.extend(lines[i + 1 :])
+                    break
+
+            tmp = path.with_suffix(".jsonl.tmp")
+            tmp.write_text("\n".join(remain) + ("\n" if remain else ""), encoding="utf-8")
+            tmp.replace(path)
+        except Exception:
+            return

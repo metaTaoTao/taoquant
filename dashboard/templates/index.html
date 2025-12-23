@@ -463,6 +463,28 @@
         </div>
     </div>
 
+    <!-- Active Limit Orders -->
+    <h2 class="section-header">Active Limit Orders</h2>
+    <div class="table-container">
+        <table>
+            <thead>
+                <tr>
+                    <th>Dir</th>
+                    <th>Level</th>
+                    <th class="text-right">Price</th>
+                    <th class="text-right">Size</th>
+                    <th>Leg</th>
+                    <th>Client OID</th>
+                </tr>
+            </thead>
+            <tbody id="active-orders">
+                <tr>
+                    <td colspan="6" class="loading">Loading active orders...</td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+
     <!-- Order Blotter -->
     <h2 class="section-header">Order Blotter</h2>
     <div class="table-container">
@@ -718,6 +740,25 @@
                                 <td class="text-right">${formatNumber(order.size, 6)}</td>
                                 <td class="text-right">$${formatNumber(order.notional, 2)}</td>
                                 <td class="text-right text-red">$${formatNumber(order.commission ?? 0, 4)}</td>
+                            </tr>
+                        `).join('');
+                    }
+                }
+
+                // Update Active Limit Orders
+                if (data.active_orders && Array.isArray(data.active_orders)) {
+                    const tbody = document.getElementById('active-orders');
+                    if (data.active_orders.length === 0) {
+                        tbody.innerHTML = '<tr><td colspan="6" class="loading">No active limit orders</td></tr>';
+                    } else {
+                        tbody.innerHTML = data.active_orders.slice(0, 30).map(o => `
+                            <tr>
+                                <td><span class="badge ${o.direction === 'buy' ? 'badge-success' : 'badge-danger'}">${String(o.direction || '').toUpperCase()}</span></td>
+                                <td>L${String(o.level).padStart(2, '0')}</td>
+                                <td class="text-right">$${formatNumber(o.price, 2)}</td>
+                                <td class="text-right">${formatNumber(o.size, 6)}</td>
+                                <td>${o.leg || 'long'}</td>
+                                <td class="text-muted">${o.client_order_id || ''}</td>
                             </tr>
                         `).join('');
                     }
