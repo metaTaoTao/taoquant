@@ -1331,11 +1331,13 @@ class BitgetLiveRunner:
             leg = o.get("leg")
 
             # Eligibility to avoid immediate taker fills
+            # Add small buffer (0.05% of price) to prevent orders that are exactly at market from executing immediately
             if cp is not None:
-                if direction == "buy" and price > cp:
-                    continue
-                if direction == "sell" and price < cp:
-                    continue
+                buffer_pct = 0.0005  # 0.05% buffer
+                if direction == "buy" and price > cp * (1.0 - buffer_pct):
+                    continue  # Skip buy orders at or too close to current price
+                if direction == "sell" and price < cp * (1.0 + buffer_pct):
+                    continue  # Skip sell orders at or too close to current price
 
             desired[self._order_key(direction, level_index, leg)] = o
 
