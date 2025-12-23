@@ -476,7 +476,18 @@
     <button id="logout-button" class="login-logout" style="display: none;" onclick="logout()">登出</button>
     <!-- Header -->
     <div class="header">
-        <h1>TaoQuant Live Trading Dashboard</h1>
+        <div style="display: flex; align-items: center; gap: 20px;">
+            <h1>TaoQuant Live Trading Dashboard</h1>
+            <!-- Bot Control Buttons -->
+            <div id="bot-controls" style="display: none;">
+                <span id="bot-status-indicator" style="margin-right: 10px; font-size: 13px;">
+                    Bot: <span class="status-dot gray"></span><span id="bot-status-text">未知</span>
+                </span>
+                <button id="btn-stop" onclick="controlBot('stop')" style="background: var(--danger-red); color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; margin-right: 5px;">停止</button>
+                <button id="btn-start" onclick="controlBot('start')" style="background: var(--success-green); color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; margin-right: 5px;">启动</button>
+                <button id="btn-restart" onclick="controlBot('restart')" style="background: var(--warning-orange); color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer;">重启</button>
+            </div>
+        </div>
         <div class="header-meta">
             <span id="mode">MODE: <span class="text-cyan">DRYRUN</span></span> |
             <span id="current-time">2025-12-23 04:37:00 UTC</span>
@@ -777,6 +788,76 @@
                 // Clear dashboard data
                 document.getElementById('equity').textContent = '-';
                 document.getElementById('current-time').textContent = '已登出';
+            }
+        }
+
+        // Bot control functions
+        async function controlBot(action) {
+            const actions = {
+                'stop': '停止',
+                'start': '启动',
+                'restart': '重启'
+            };
+            if (!confirm(`确定要${actions[action]} Bot 吗？`)) {
+                return;
+            }
+            
+            const token = getStoredToken();
+            const headers = token ? { 'Authorization': `Bearer ${token}` } : {};
+            
+            try {
+                const response = await fetch(`/api/bot/${action}`, {
+                    method: 'POST',
+                    headers: headers
+                });
+                
+                if (response.ok) {
+                    alert(`Bot ${actions[action]}成功！`);
+                    // Refresh bot status after 1 second
+                    setTimeout(updateBotStatus, 1000);
+                } else {
+                    const error = await response.text();
+                    alert(`操作失败: ${error}`);
+                }
+            } catch (error) {
+                alert(`请求失败: ${error.message}`);
+            }
+        }
+
+        async function updateBotStatus() {
+            const token = getStoredToken();
+            const headers = token ? { 'Authorization': `Bearer ${token}` } : {};
+            
+            try {
+                const response = await fetch('/api/bot/status', { headers });
+                if (response.ok) {
+                    const data = await response.json();
+                    const statusText = document.getElementById('bot-status-text');
+                    const statusDot = document.querySelector('#bot-status-indicator .status-dot');
+                    const controls = document.getElementById('bot-controls');
+                    
+                    controls.style.display = 'inline-block';
+                    
+                    if (data.status === 'active') {
+                        statusText.textContent = '运行中';
+                        statusDot.className = 'status-dot green';
+                    } else if (data.status === 'inactive' || data.status === 'dead') {
+                        statusText.textContent = '已停止';
+                        statusDot.className = 'status-dot red';
+                    } else if (data.status === 'manual') {
+                        statusText.textContent = '手动模式';
+                        statusDot.className = 'status-dot orange';
+                        // Hide control buttons if in manual mode (control disabled)
+                        document.getElementById('btn-stop').style.display = 'none';
+                        document.getElementById('btn-start').style.display = 'none';
+                        document.getElementById('btn-restart').style.display = 'none';
+                    } else {
+                        statusText.textContent = data.status || '未知';
+                        statusDot.className = 'status-dot gray';
+                    }
+                }
+            } catch (error) {
+                console.error('Error fetching bot status:', error);
             }
         }
         
@@ -1200,8 +1281,11 @@
         // Initial load (only if authenticated or no auth required)
         if (!REQUIRES_AUTH || getStoredToken()) {
             updateDashboard();
+            updateBotStatus();
             // Auto-refresh every 5 seconds
             setInterval(updateDashboard, 5000);
+            // Refresh bot status every 10 seconds
+            setInterval(updateBotStatus, 10000);
         }
     </script>
 </body>
