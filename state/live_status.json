@@ -1,29 +1,29 @@
 {
-  "ts": "2025-12-23T17:46:00+00:00",
+  "ts": "2025-12-23T17:50:00+00:00",
   "mode": "dryrun",
   "portfolio": {
-    "equity": 101.27545477692837,
+    "equity": 101.11870088943209,
     "initial_cash": 100.0,
     "realized_pnl": 3.0050551411900983,
-    "unrealized_pnl": -1.729600364261728,
-    "total_pnl": 1.2754547769283704,
-    "total_pnl_pct": 0.012754547769283704,
+    "unrealized_pnl": -1.8863542517580072,
+    "total_pnl": 1.1187008894320911,
+    "total_pnl_pct": 0.01118700889432091,
     "daily_pnl": 0.0,
     "daily_pnl_pct": 0.0,
-    "peak_equity_today": 101.27545477692837,
-    "peak_equity_today_time": "2025-12-23T17:46:00+00:00",
+    "peak_equity_today": 101.11870088943209,
+    "peak_equity_today_time": "2025-12-23T17:50:00+00:00",
     "total_trades": 65,
     "open_positions_count": 1
   },
   "position": {
     "net_position_btc": 0.0038420070464771825,
     "direction": "LONG",
-    "position_value_usd": 336.8671778351194,
+    "position_value_usd": 336.7104239476231,
     "avg_cost": 88130.17693438346,
     "breakeven_price": 88130.17693438346,
-    "unrealized_pnl": -1.729600364261728,
-    "unrealized_pnl_pct": -0.005108141824206197,
-    "distance_to_cost_pct": -0.0051080906681786825,
+    "unrealized_pnl": -1.8863542517580072,
+    "unrealized_pnl_pct": -0.005571093327554453,
+    "distance_to_cost_pct": -0.005571042195331296,
     "long_holdings": 0.0038420070464771825,
     "short_holdings": 0.0,
     "cost_basis": 338.5967781993811,
@@ -32,18 +32,18 @@
   "market": {
     "symbol": "BTCUSDT",
     "exchange": "Bitget",
-    "close": 87680.0,
-    "open": 87720.9,
-    "high": 87720.9,
-    "low": 87664.1,
-    "volume": 5.2498,
+    "close": 87639.2,
+    "open": 87724.2,
+    "high": 87727.2,
+    "low": 87632.0,
+    "volume": 7.1551,
     "change_24h": 0.0,
     "change_24h_pct": 0.0,
-    "high_24h": 87680.0,
-    "low_24h": 87680.0,
+    "high_24h": 87639.2,
+    "low_24h": 87639.2,
     "atr_14": 49.97271149886546,
     "spread": 0.0,
-    "timestamp": "2025-12-23T17:46:00+00:00",
+    "timestamp": "2025-12-23T17:50:00+00:00",
     "data_latency_ms": 0.0
   },
   "risk": {
@@ -53,22 +53,22 @@
     "checks": {
       "price_depth": {
         "status": "OK",
-        "value": 87680.0,
+        "value": 87639.2,
         "threshold": 83850.08186550341
       },
       "unrealized_loss": {
         "status": "OK",
-        "value_pct": 0.01707817919032193,
+        "value_pct": 0.018654850538681614,
         "threshold": 0.3,
-        "adjusted_threshold": 0.28124504848075405
+        "adjusted_threshold": 0.2812159746147472
       },
       "inventory_risk": {
         "status": "OK",
-        "value_pct": 0.06652494004141689,
+        "value_pct": 0.06659706285502975,
         "threshold": 0.8
       }
     },
-    "last_check_time": "2025-12-23T17:46:00+00:00"
+    "last_check_time": "2025-12-23T17:50:00+00:00"
   },
   "strategy": {
     "name": "TaoGrid NEUTRAL_RANGE",
@@ -91,7 +91,7 @@
     "max_inventory_risk": 0.8,
     "max_unrealized_loss": 0.3,
     "start_time": "2025-12-23T02:06:04.093259+00:00",
-    "uptime_seconds": 56395
+    "uptime_seconds": 56635
   },
   "orders": [
     {
@@ -108,11 +108,11 @@
       "execution_type": "DRY_RUN_FILL",
       "matched_trade": null,
       "factors": {
-        "trend_score": 0.9667379613580928,
-        "mr_z": 0.3219933444945512,
+        "trend_score": 0.9340452603567395,
+        "mr_z": 0.1945831831097097,
         "breakout_risk_down": 0.0,
         "breakout_risk_up": 0.0,
-        "range_pos": 0.368,
+        "range_pos": 0.3639199999999997,
         "vol_score": 0.0,
         "funding_rate": 0.0,
         "minutes_to_funding": NaN
@@ -132,11 +132,11 @@
       "execution_type": "DRY_RUN_FILL",
       "matched_trade": null,
       "factors": {
-        "trend_score": 0.9667379613580928,
-        "mr_z": 0.3219933444945512,
+        "trend_score": 0.9340452603567395,
+        "mr_z": 0.1945831831097097,
         "breakout_risk_down": 0.0,
         "breakout_risk_up": 0.0,
-        "range_pos": 0.368,
+        "range_pos": 0.3639199999999997,
         "vol_score": 0.0,
         "funding_rate": 0.0,
         "minutes_to_funding": NaN
@@ -156,11 +156,11 @@
       "execution_type": "DRY_RUN_FILL",
       "matched_trade": null,
       "factors": {
-        "trend_score": 0.9667379613580928,
-        "mr_z": 0.3219933444945512,
+        "trend_score": 0.9340452603567395,
+        "mr_z": 0.1945831831097097,
         "breakout_risk_down": 0.0,
         "breakout_risk_up": 0.0,
-        "range_pos": 0.368,
+        "range_pos": 0.3639199999999997,
         "vol_score": 0.0,
         "funding_rate": 0.0,
         "minutes_to_funding": NaN
@@ -180,11 +180,11 @@
       "execution_type": "DRY_RUN_FILL",
       "matched_trade": null,
       "factors": {
-        "trend_score": 0.9667379613580928,
-        "mr_z": 0.3219933444945512,
+        "trend_score": 0.9340452603567395,
+        "mr_z": 0.1945831831097097,
         "breakout_risk_down": 0.0,
         "breakout_risk_up": 0.0,
-        "range_pos": 0.368,
+        "range_pos": 0.3639199999999997,
         "vol_score": 0.0,
         "funding_rate": 0.0,
         "minutes_to_funding": NaN
@@ -204,11 +204,11 @@
       "execution_type": "DRY_RUN_FILL",
       "matched_trade": null,
       "factors": {
-        "trend_score": 0.9667379613580928,
-        "mr_z": 0.3219933444945512,
+        "trend_score": 0.9340452603567395,
+        "mr_z": 0.1945831831097097,
         "breakout_risk_down": 0.0,
         "breakout_risk_up": 0.0,
-        "range_pos": 0.368,
+        "range_pos": 0.3639199999999997,
         "vol_score": 0.0,
         "funding_rate": 0.0,
         "minutes_to_funding": NaN
@@ -228,11 +228,11 @@
       "execution_type": "DRY_RUN_FILL",
       "matched_trade": null,
       "factors": {
-        "trend_score": 0.9667379613580928,
-        "mr_z": 0.3219933444945512,
+        "trend_score": 0.9340452603567395,
+        "mr_z": 0.1945831831097097,
         "breakout_risk_down": 0.0,
         "breakout_risk_up": 0.0,
-        "range_pos": 0.368,
+        "range_pos": 0.3639199999999997,
         "vol_score": 0.0,
         "funding_rate": 0.0,
         "minutes_to_funding": NaN
@@ -252,11 +252,11 @@
       "execution_type": "DRY_RUN_FILL",
       "matched_trade": null,
       "factors": {
-        "trend_score": 0.9667379613580928,
-        "mr_z": 0.3219933444945512,
+        "trend_score": 0.9340452603567395,
+        "mr_z": 0.1945831831097097,
         "breakout_risk_down": 0.0,
         "breakout_risk_up": 0.0,
-        "range_pos": 0.368,
+        "range_pos": 0.3639199999999997,
         "vol_score": 0.0,
         "funding_rate": 0.0,
         "minutes_to_funding": NaN
@@ -276,11 +276,11 @@
       "execution_type": "DRY_RUN_FILL",
       "matched_trade": null,
       "factors": {
-        "trend_score": 0.9667379613580928,
-        "mr_z": 0.3219933444945512,
+        "trend_score": 0.9340452603567395,
+        "mr_z": 0.1945831831097097,
         "breakout_risk_down": 0.0,
         "breakout_risk_up": 0.0,
-        "range_pos": 0.368,
+        "range_pos": 0.3639199999999997,
         "vol_score": 0.0,
         "funding_rate": 0.0,
         "minutes_to_funding": NaN
@@ -300,11 +300,11 @@
       "execution_type": "DRY_RUN_FILL",
       "matched_trade": null,
       "factors": {
-        "trend_score": 0.9667379613580928,
-        "mr_z": 0.3219933444945512,
+        "trend_score": 0.9340452603567395,
+        "mr_z": 0.1945831831097097,
         "breakout_risk_down": 0.0,
         "breakout_risk_up": 0.0,
-        "range_pos": 0.368,
+        "range_pos": 0.3639199999999997,
         "vol_score": 0.0,
         "funding_rate": 0.0,
         "minutes_to_funding": NaN
@@ -324,11 +324,11 @@
       "execution_type": "DRY_RUN_FILL",
       "matched_trade": null,
       "factors": {
-        "trend_score": 0.9667379613580928,
-        "mr_z": 0.3219933444945512,
+        "trend_score": 0.9340452603567395,
+        "mr_z": 0.1945831831097097,
         "breakout_risk_down": 0.0,
         "breakout_risk_up": 0.0,
-        "range_pos": 0.368,
+        "range_pos": 0.3639199999999997,
         "vol_score": 0.0,
         "funding_rate": 0.0,
         "minutes_to_funding": NaN
@@ -348,11 +348,11 @@
       "execution_type": "DRY_RUN_FILL",
       "matched_trade": null,
       "factors": {
-        "trend_score": 0.9667379613580928,
-        "mr_z": 0.3219933444945512,
+        "trend_score": 0.9340452603567395,
+        "mr_z": 0.1945831831097097,
         "breakout_risk_down": 0.0,
         "breakout_risk_up": 0.0,
-        "range_pos": 0.368,
+        "range_pos": 0.3639199999999997,
         "vol_score": 0.0,
         "funding_rate": 0.0,
         "minutes_to_funding": NaN
@@ -372,11 +372,11 @@
       "execution_type": "DRY_RUN_FILL",
       "matched_trade": null,
       "factors": {
-        "trend_score": 0.9667379613580928,
-        "mr_z": 0.3219933444945512,
+        "trend_score": 0.9340452603567395,
+        "mr_z": 0.1945831831097097,
         "breakout_risk_down": 0.0,
         "breakout_risk_up": 0.0,
-        "range_pos": 0.368,
+        "range_pos": 0.3639199999999997,
         "vol_score": 0.0,
         "funding_rate": 0.0,
         "minutes_to_funding": NaN
@@ -396,11 +396,11 @@
       "execution_type": "DRY_RUN_FILL",
       "matched_trade": null,
       "factors": {
-        "trend_score": 0.9667379613580928,
-        "mr_z": 0.3219933444945512,
+        "trend_score": 0.9340452603567395,
+        "mr_z": 0.1945831831097097,
         "breakout_risk_down": 0.0,
         "breakout_risk_up": 0.0,
-        "range_pos": 0.368,
+        "range_pos": 0.3639199999999997,
         "vol_score": 0.0,
         "funding_rate": 0.0,
         "minutes_to_funding": NaN
@@ -420,11 +420,11 @@
       "execution_type": "DRY_RUN_FILL",
       "matched_trade": null,
       "factors": {
-        "trend_score": 0.9667379613580928,
-        "mr_z": 0.3219933444945512,
+        "trend_score": 0.9340452603567395,
+        "mr_z": 0.1945831831097097,
         "breakout_risk_down": 0.0,
         "breakout_risk_up": 0.0,
-        "range_pos": 0.368,
+        "range_pos": 0.3639199999999997,
         "vol_score": 0.0,
         "funding_rate": 0.0,
         "minutes_to_funding": NaN
@@ -444,11 +444,11 @@
       "execution_type": "DRY_RUN_FILL",
       "matched_trade": null,
       "factors": {
-        "trend_score": 0.9667379613580928,
-        "mr_z": 0.3219933444945512,
+        "trend_score": 0.9340452603567395,
+        "mr_z": 0.1945831831097097,
         "breakout_risk_down": 0.0,
         "breakout_risk_up": 0.0,
-        "range_pos": 0.368,
+        "range_pos": 0.3639199999999997,
         "vol_score": 0.0,
         "funding_rate": 0.0,
         "minutes_to_funding": NaN
@@ -468,11 +468,11 @@
       "execution_type": "DRY_RUN_FILL",
       "matched_trade": null,
       "factors": {
-        "trend_score": 0.9667379613580928,
-        "mr_z": 0.3219933444945512,
+        "trend_score": 0.9340452603567395,
+        "mr_z": 0.1945831831097097,
         "breakout_risk_down": 0.0,
         "breakout_risk_up": 0.0,
-        "range_pos": 0.368,
+        "range_pos": 0.3639199999999997,
         "vol_score": 0.0,
         "funding_rate": 0.0,
         "minutes_to_funding": NaN
@@ -492,11 +492,11 @@
       "execution_type": "DRY_RUN_FILL",
       "matched_trade": null,
       "factors": {
-        "trend_score": 0.9667379613580928,
-        "mr_z": 0.3219933444945512,
+        "trend_score": 0.9340452603567395,
+        "mr_z": 0.1945831831097097,
         "breakout_risk_down": 0.0,
         "breakout_risk_up": 0.0,
-        "range_pos": 0.368,
+        "range_pos": 0.3639199999999997,
         "vol_score": 0.0,
         "funding_rate": 0.0,
         "minutes_to_funding": NaN
@@ -516,11 +516,11 @@
       "execution_type": "DRY_RUN_FILL",
       "matched_trade": null,
       "factors": {
-        "trend_score": 0.9667379613580928,
-        "mr_z": 0.3219933444945512,
+        "trend_score": 0.9340452603567395,
+        "mr_z": 0.1945831831097097,
         "breakout_risk_down": 0.0,
         "breakout_risk_up": 0.0,
-        "range_pos": 0.368,
+        "range_pos": 0.3639199999999997,
         "vol_score": 0.0,
         "funding_rate": 0.0,
         "minutes_to_funding": NaN
@@ -540,11 +540,11 @@
       "execution_type": "DRY_RUN_FILL",
       "matched_trade": null,
       "factors": {
-        "trend_score": 0.9667379613580928,
-        "mr_z": 0.3219933444945512,
+        "trend_score": 0.9340452603567395,
+        "mr_z": 0.1945831831097097,
         "breakout_risk_down": 0.0,
         "breakout_risk_up": 0.0,
-        "range_pos": 0.368,
+        "range_pos": 0.3639199999999997,
         "vol_score": 0.0,
         "funding_rate": 0.0,
         "minutes_to_funding": NaN
@@ -564,11 +564,11 @@
       "execution_type": "DRY_RUN_FILL",
       "matched_trade": null,
       "factors": {
-        "trend_score": 0.9667379613580928,
-        "mr_z": 0.3219933444945512,
+        "trend_score": 0.9340452603567395,
+        "mr_z": 0.1945831831097097,
         "breakout_risk_down": 0.0,
         "breakout_risk_up": 0.0,
-        "range_pos": 0.368,
+        "range_pos": 0.3639199999999997,
         "vol_score": 0.0,
         "funding_rate": 0.0,
         "minutes_to_funding": NaN
@@ -588,11 +588,11 @@
       "execution_type": "DRY_RUN_FILL",
       "matched_trade": null,
       "factors": {
-        "trend_score": 0.9667379613580928,
-        "mr_z": 0.3219933444945512,
+        "trend_score": 0.9340452603567395,
+        "mr_z": 0.1945831831097097,
         "breakout_risk_down": 0.0,
         "breakout_risk_up": 0.0,
-        "range_pos": 0.368,
+        "range_pos": 0.3639199999999997,
         "vol_score": 0.0,
         "funding_rate": 0.0,
         "minutes_to_funding": NaN
@@ -612,11 +612,11 @@
       "execution_type": "DRY_RUN_FILL",
       "matched_trade": null,
       "factors": {
-        "trend_score": 0.9667379613580928,
-        "mr_z": 0.3219933444945512,
+        "trend_score": 0.9340452603567395,
+        "mr_z": 0.1945831831097097,
         "breakout_risk_down": 0.0,
         "breakout_risk_up": 0.0,
-        "range_pos": 0.368,
+        "range_pos": 0.3639199999999997,
         "vol_score": 0.0,
         "funding_rate": 0.0,
         "minutes_to_funding": NaN
@@ -636,11 +636,11 @@
       "execution_type": "DRY_RUN_FILL",
       "matched_trade": null,
       "factors": {
-        "trend_score": 0.9667379613580928,
-        "mr_z": 0.3219933444945512,
+        "trend_score": 0.9340452603567395,
+        "mr_z": 0.1945831831097097,
         "breakout_risk_down": 0.0,
         "breakout_risk_up": 0.0,
-        "range_pos": 0.368,
+        "range_pos": 0.3639199999999997,
         "vol_score": 0.0,
         "funding_rate": 0.0,
         "minutes_to_funding": NaN
@@ -660,11 +660,11 @@
       "execution_type": "DRY_RUN_FILL",
       "matched_trade": null,
       "factors": {
-        "trend_score": 0.9667379613580928,
-        "mr_z": 0.3219933444945512,
+        "trend_score": 0.9340452603567395,
+        "mr_z": 0.1945831831097097,
         "breakout_risk_down": 0.0,
         "breakout_risk_up": 0.0,
-        "range_pos": 0.368,
+        "range_pos": 0.3639199999999997,
         "vol_score": 0.0,
         "funding_rate": 0.0,
         "minutes_to_funding": NaN
@@ -684,11 +684,11 @@
       "execution_type": "DRY_RUN_FILL",
       "matched_trade": null,
       "factors": {
-        "trend_score": 0.9667379613580928,
-        "mr_z": 0.3219933444945512,
+        "trend_score": 0.9340452603567395,
+        "mr_z": 0.1945831831097097,
         "breakout_risk_down": 0.0,
         "breakout_risk_up": 0.0,
-        "range_pos": 0.368,
+        "range_pos": 0.3639199999999997,
         "vol_score": 0.0,
         "funding_rate": 0.0,
         "minutes_to_funding": NaN
@@ -708,11 +708,11 @@
       "execution_type": "DRY_RUN_FILL",
       "matched_trade": null,
       "factors": {
-        "trend_score": 0.9667379613580928,
-        "mr_z": 0.3219933444945512,
+        "trend_score": 0.9340452603567395,
+        "mr_z": 0.1945831831097097,
         "breakout_risk_down": 0.0,
         "breakout_risk_up": 0.0,
-        "range_pos": 0.368,
+        "range_pos": 0.3639199999999997,
         "vol_score": 0.0,
         "funding_rate": 0.0,
         "minutes_to_funding": NaN
@@ -732,11 +732,11 @@
       "execution_type": "DRY_RUN_FILL",
       "matched_trade": null,
       "factors": {
-        "trend_score": 0.9667379613580928,
-        "mr_z": 0.3219933444945512,
+        "trend_score": 0.9340452603567395,
+        "mr_z": 0.1945831831097097,
         "breakout_risk_down": 0.0,
         "breakout_risk_up": 0.0,
-        "range_pos": 0.368,
+        "range_pos": 0.3639199999999997,
         "vol_score": 0.0,
         "funding_rate": 0.0,
         "minutes_to_funding": NaN
@@ -756,11 +756,11 @@
       "execution_type": "DRY_RUN_FILL",
       "matched_trade": null,
       "factors": {
-        "trend_score": 0.9667379613580928,
-        "mr_z": 0.3219933444945512,
+        "trend_score": 0.9340452603567395,
+        "mr_z": 0.1945831831097097,
         "breakout_risk_down": 0.0,
         "breakout_risk_up": 0.0,
-        "range_pos": 0.368,
+        "range_pos": 0.3639199999999997,
         "vol_score": 0.0,
         "funding_rate": 0.0,
         "minutes_to_funding": NaN
@@ -780,11 +780,11 @@
       "execution_type": "DRY_RUN_FILL",
       "matched_trade": null,
       "factors": {
-        "trend_score": 0.9667379613580928,
-        "mr_z": 0.3219933444945512,
+        "trend_score": 0.9340452603567395,
+        "mr_z": 0.1945831831097097,
         "breakout_risk_down": 0.0,
         "breakout_risk_up": 0.0,
-        "range_pos": 0.368,
+        "range_pos": 0.3639199999999997,
         "vol_score": 0.0,
         "funding_rate": 0.0,
         "minutes_to_funding": NaN
@@ -804,11 +804,11 @@
       "execution_type": "DRY_RUN_FILL",
       "matched_trade": null,
       "factors": {
-        "trend_score": 0.9667379613580928,
-        "mr_z": 0.3219933444945512,
+        "trend_score": 0.9340452603567395,
+        "mr_z": 0.1945831831097097,
         "breakout_risk_down": 0.0,
         "breakout_risk_up": 0.0,
-        "range_pos": 0.368,
+        "range_pos": 0.3639199999999997,
         "vol_score": 0.0,
         "funding_rate": 0.0,
         "minutes_to_funding": NaN
@@ -828,11 +828,11 @@
       "execution_type": "DRY_RUN_FILL",
       "matched_trade": null,
       "factors": {
-        "trend_score": 0.9667379613580928,
-        "mr_z": 0.3219933444945512,
+        "trend_score": 0.9340452603567395,
+        "mr_z": 0.1945831831097097,
         "breakout_risk_down": 0.0,
         "breakout_risk_up": 0.0,
-        "range_pos": 0.368,
+        "range_pos": 0.3639199999999997,
         "vol_score": 0.0,
         "funding_rate": 0.0,
         "minutes_to_funding": NaN
@@ -852,11 +852,11 @@
       "execution_type": "DRY_RUN_FILL",
       "matched_trade": null,
       "factors": {
-        "trend_score": 0.9667379613580928,
-        "mr_z": 0.3219933444945512,
+        "trend_score": 0.9340452603567395,
+        "mr_z": 0.1945831831097097,
         "breakout_risk_down": 0.0,
         "breakout_risk_up": 0.0,
-        "range_pos": 0.368,
+        "range_pos": 0.3639199999999997,
         "vol_score": 0.0,
         "funding_rate": 0.0,
         "minutes_to_funding": NaN
@@ -876,11 +876,11 @@
       "execution_type": "DRY_RUN_FILL",
       "matched_trade": null,
       "factors": {
-        "trend_score": 0.9667379613580928,
-        "mr_z": 0.3219933444945512,
+        "trend_score": 0.9340452603567395,
+        "mr_z": 0.1945831831097097,
         "breakout_risk_down": 0.0,
         "breakout_risk_up": 0.0,
-        "range_pos": 0.368,
+        "range_pos": 0.3639199999999997,
         "vol_score": 0.0,
         "funding_rate": 0.0,
         "minutes_to_funding": NaN
@@ -900,11 +900,11 @@
       "execution_type": "DRY_RUN_FILL",
       "matched_trade": null,
       "factors": {
-        "trend_score": 0.9667379613580928,
-        "mr_z": 0.3219933444945512,
+        "trend_score": 0.9340452603567395,
+        "mr_z": 0.1945831831097097,
         "breakout_risk_down": 0.0,
         "breakout_risk_up": 0.0,
-        "range_pos": 0.368,
+        "range_pos": 0.3639199999999997,
         "vol_score": 0.0,
         "funding_rate": 0.0,
         "minutes_to_funding": NaN
@@ -924,11 +924,11 @@
       "execution_type": "DRY_RUN_FILL",
       "matched_trade": null,
       "factors": {
-        "trend_score": 0.9667379613580928,
-        "mr_z": 0.3219933444945512,
+        "trend_score": 0.9340452603567395,
+        "mr_z": 0.1945831831097097,
         "breakout_risk_down": 0.0,
         "breakout_risk_up": 0.0,
-        "range_pos": 0.368,
+        "range_pos": 0.3639199999999997,
         "vol_score": 0.0,
         "funding_rate": 0.0,
         "minutes_to_funding": NaN
@@ -948,11 +948,11 @@
       "execution_type": "DRY_RUN_FILL",
       "matched_trade": null,
       "factors": {
-        "trend_score": 0.9667379613580928,
-        "mr_z": 0.3219933444945512,
+        "trend_score": 0.9340452603567395,
+        "mr_z": 0.1945831831097097,
         "breakout_risk_down": 0.0,
         "breakout_risk_up": 0.0,
-        "range_pos": 0.368,
+        "range_pos": 0.3639199999999997,
         "vol_score": 0.0,
         "funding_rate": 0.0,
         "minutes_to_funding": NaN
@@ -972,11 +972,11 @@
       "execution_type": "DRY_RUN_FILL",
       "matched_trade": null,
       "factors": {
-        "trend_score": 0.9667379613580928,
-        "mr_z": 0.3219933444945512,
+        "trend_score": 0.9340452603567395,
+        "mr_z": 0.1945831831097097,
         "breakout_risk_down": 0.0,
         "breakout_risk_up": 0.0,
-        "range_pos": 0.368,
+        "range_pos": 0.3639199999999997,
         "vol_score": 0.0,
         "funding_rate": 0.0,
         "minutes_to_funding": NaN
@@ -996,11 +996,11 @@
       "execution_type": "DRY_RUN_FILL",
       "matched_trade": null,
       "factors": {
-        "trend_score": 0.9667379613580928,
-        "mr_z": 0.3219933444945512,
+        "trend_score": 0.9340452603567395,
+        "mr_z": 0.1945831831097097,
         "breakout_risk_down": 0.0,
         "breakout_risk_up": 0.0,
-        "range_pos": 0.368,
+        "range_pos": 0.3639199999999997,
         "vol_score": 0.0,
         "funding_rate": 0.0,
         "minutes_to_funding": NaN
@@ -1020,11 +1020,11 @@
       "execution_type": "DRY_RUN_FILL",
       "matched_trade": null,
       "factors": {
-        "trend_score": 0.9667379613580928,
-        "mr_z": 0.3219933444945512,
+        "trend_score": 0.9340452603567395,
+        "mr_z": 0.1945831831097097,
         "breakout_risk_down": 0.0,
         "breakout_risk_up": 0.0,
-        "range_pos": 0.368,
+        "range_pos": 0.3639199999999997,
         "vol_score": 0.0,
         "funding_rate": 0.0,
         "minutes_to_funding": NaN
@@ -1044,11 +1044,11 @@
       "execution_type": "DRY_RUN_FILL",
       "matched_trade": null,
       "factors": {
-        "trend_score": 0.9667379613580928,
-        "mr_z": 0.3219933444945512,
+        "trend_score": 0.9340452603567395,
+        "mr_z": 0.1945831831097097,
         "breakout_risk_down": 0.0,
         "breakout_risk_up": 0.0,
-        "range_pos": 0.368,
+        "range_pos": 0.3639199999999997,
         "vol_score": 0.0,
         "funding_rate": 0.0,
         "minutes_to_funding": NaN
@@ -1068,11 +1068,11 @@
       "execution_type": "DRY_RUN_FILL",
       "matched_trade": null,
       "factors": {
-        "trend_score": 0.9667379613580928,
-        "mr_z": 0.3219933444945512,
+        "trend_score": 0.9340452603567395,
+        "mr_z": 0.1945831831097097,
         "breakout_risk_down": 0.0,
         "breakout_risk_up": 0.0,
-        "range_pos": 0.368,
+        "range_pos": 0.3639199999999997,
         "vol_score": 0.0,
         "funding_rate": 0.0,
         "minutes_to_funding": NaN
@@ -1092,11 +1092,11 @@
       "execution_type": "DRY_RUN_FILL",
       "matched_trade": null,
       "factors": {
-        "trend_score": 0.9667379613580928,
-        "mr_z": 0.3219933444945512,
+        "trend_score": 0.9340452603567395,
+        "mr_z": 0.1945831831097097,
         "breakout_risk_down": 0.0,
         "breakout_risk_up": 0.0,
-        "range_pos": 0.368,
+        "range_pos": 0.3639199999999997,
         "vol_score": 0.0,
         "funding_rate": 0.0,
         "minutes_to_funding": NaN
@@ -1116,11 +1116,11 @@
       "execution_type": "DRY_RUN_FILL",
       "matched_trade": null,
       "factors": {
-        "trend_score": 0.9667379613580928,
-        "mr_z": 0.3219933444945512,
+        "trend_score": 0.9340452603567395,
+        "mr_z": 0.1945831831097097,
         "breakout_risk_down": 0.0,
         "breakout_risk_up": 0.0,
-        "range_pos": 0.368,
+        "range_pos": 0.3639199999999997,
         "vol_score": 0.0,
         "funding_rate": 0.0,
         "minutes_to_funding": NaN
@@ -1140,11 +1140,11 @@
       "execution_type": "DRY_RUN_FILL",
       "matched_trade": null,
       "factors": {
-        "trend_score": 0.9667379613580928,
-        "mr_z": 0.3219933444945512,
+        "trend_score": 0.9340452603567395,
+        "mr_z": 0.1945831831097097,
         "breakout_risk_down": 0.0,
         "breakout_risk_up": 0.0,
-        "range_pos": 0.368,
+        "range_pos": 0.3639199999999997,
         "vol_score": 0.0,
         "funding_rate": 0.0,
         "minutes_to_funding": NaN
@@ -1164,11 +1164,11 @@
       "execution_type": "DRY_RUN_FILL",
       "matched_trade": null,
       "factors": {
-        "trend_score": 0.9667379613580928,
-        "mr_z": 0.3219933444945512,
+        "trend_score": 0.9340452603567395,
+        "mr_z": 0.1945831831097097,
         "breakout_risk_down": 0.0,
         "breakout_risk_up": 0.0,
-        "range_pos": 0.368,
+        "range_pos": 0.3639199999999997,
         "vol_score": 0.0,
         "funding_rate": 0.0,
         "minutes_to_funding": NaN
@@ -1188,11 +1188,11 @@
       "execution_type": "DRY_RUN_FILL",
       "matched_trade": null,
       "factors": {
-        "trend_score": 0.9667379613580928,
-        "mr_z": 0.3219933444945512,
+        "trend_score": 0.9340452603567395,
+        "mr_z": 0.1945831831097097,
         "breakout_risk_down": 0.0,
         "breakout_risk_up": 0.0,
-        "range_pos": 0.368,
+        "range_pos": 0.3639199999999997,
         "vol_score": 0.0,
         "funding_rate": 0.0,
         "minutes_to_funding": NaN
@@ -1212,11 +1212,11 @@
       "execution_type": "DRY_RUN_FILL",
       "matched_trade": null,
       "factors": {
-        "trend_score": 0.9667379613580928,
-        "mr_z": 0.3219933444945512,
+        "trend_score": 0.9340452603567395,
+        "mr_z": 0.1945831831097097,
         "breakout_risk_down": 0.0,
         "breakout_risk_up": 0.0,
-        "range_pos": 0.368,
+        "range_pos": 0.3639199999999997,
         "vol_score": 0.0,
         "funding_rate": 0.0,
         "minutes_to_funding": NaN
@@ -1236,11 +1236,11 @@
       "execution_type": "DRY_RUN_FILL",
       "matched_trade": null,
       "factors": {
-        "trend_score": 0.9667379613580928,
-        "mr_z": 0.3219933444945512,
+        "trend_score": 0.9340452603567395,
+        "mr_z": 0.1945831831097097,
         "breakout_risk_down": 0.0,
         "breakout_risk_up": 0.0,
-        "range_pos": 0.368,
+        "range_pos": 0.3639199999999997,
         "vol_score": 0.0,
         "funding_rate": 0.0,
         "minutes_to_funding": NaN
@@ -1260,11 +1260,11 @@
       "execution_type": "DRY_RUN_FILL",
       "matched_trade": null,
       "factors": {
-        "trend_score": 0.9667379613580928,
-        "mr_z": 0.3219933444945512,
+        "trend_score": 0.9340452603567395,
+        "mr_z": 0.1945831831097097,
         "breakout_risk_down": 0.0,
         "breakout_risk_up": 0.0,
-        "range_pos": 0.368,
+        "range_pos": 0.3639199999999997,
         "vol_score": 0.0,
         "funding_rate": 0.0,
         "minutes_to_funding": NaN
@@ -1284,11 +1284,11 @@
       "execution_type": "DRY_RUN_FILL",
       "matched_trade": null,
       "factors": {
-        "trend_score": 0.9667379613580928,
-        "mr_z": 0.3219933444945512,
+        "trend_score": 0.9340452603567395,
+        "mr_z": 0.1945831831097097,
         "breakout_risk_down": 0.0,
         "breakout_risk_up": 0.0,
-        "range_pos": 0.368,
+        "range_pos": 0.3639199999999997,
         "vol_score": 0.0,
         "funding_rate": 0.0,
         "minutes_to_funding": NaN
@@ -1308,11 +1308,11 @@
       "execution_type": "DRY_RUN_FILL",
       "matched_trade": null,
       "factors": {
-        "trend_score": 0.9667379613580928,
-        "mr_z": 0.3219933444945512,
+        "trend_score": 0.9340452603567395,
+        "mr_z": 0.1945831831097097,
         "breakout_risk_down": 0.0,
         "breakout_risk_up": 0.0,
-        "range_pos": 0.368,
+        "range_pos": 0.3639199999999997,
         "vol_score": 0.0,
         "funding_rate": 0.0,
         "minutes_to_funding": NaN
@@ -1332,11 +1332,11 @@
       "execution_type": "DRY_RUN_FILL",
       "matched_trade": null,
       "factors": {
-        "trend_score": 0.9667379613580928,
-        "mr_z": 0.3219933444945512,
+        "trend_score": 0.9340452603567395,
+        "mr_z": 0.1945831831097097,
         "breakout_risk_down": 0.0,
         "breakout_risk_up": 0.0,
-        "range_pos": 0.368,
+        "range_pos": 0.3639199999999997,
         "vol_score": 0.0,
         "funding_rate": 0.0,
         "minutes_to_funding": NaN
@@ -1356,11 +1356,11 @@
       "execution_type": "DRY_RUN_FILL",
       "matched_trade": null,
       "factors": {
-        "trend_score": 0.9667379613580928,
-        "mr_z": 0.3219933444945512,
+        "trend_score": 0.9340452603567395,
+        "mr_z": 0.1945831831097097,
         "breakout_risk_down": 0.0,
         "breakout_risk_up": 0.0,
-        "range_pos": 0.368,
+        "range_pos": 0.3639199999999997,
         "vol_score": 0.0,
         "funding_rate": 0.0,
         "minutes_to_funding": NaN
@@ -1380,11 +1380,11 @@
       "execution_type": "DRY_RUN_FILL",
       "matched_trade": null,
       "factors": {
-        "trend_score": 0.9667379613580928,
-        "mr_z": 0.3219933444945512,
+        "trend_score": 0.9340452603567395,
+        "mr_z": 0.1945831831097097,
         "breakout_risk_down": 0.0,
         "breakout_risk_up": 0.0,
-        "range_pos": 0.368,
+        "range_pos": 0.3639199999999997,
         "vol_score": 0.0,
         "funding_rate": 0.0,
         "minutes_to_funding": NaN
@@ -1404,11 +1404,11 @@
       "execution_type": "DRY_RUN_FILL",
       "matched_trade": null,
       "factors": {
-        "trend_score": 0.9667379613580928,
-        "mr_z": 0.3219933444945512,
+        "trend_score": 0.9340452603567395,
+        "mr_z": 0.1945831831097097,
         "breakout_risk_down": 0.0,
         "breakout_risk_up": 0.0,
-        "range_pos": 0.368,
+        "range_pos": 0.3639199999999997,
         "vol_score": 0.0,
         "funding_rate": 0.0,
         "minutes_to_funding": NaN
@@ -1428,11 +1428,11 @@
       "execution_type": "DRY_RUN_FILL",
       "matched_trade": null,
       "factors": {
-        "trend_score": 0.9667379613580928,
-        "mr_z": 0.3219933444945512,
+        "trend_score": 0.9340452603567395,
+        "mr_z": 0.1945831831097097,
         "breakout_risk_down": 0.0,
         "breakout_risk_up": 0.0,
-        "range_pos": 0.368,
+        "range_pos": 0.3639199999999997,
         "vol_score": 0.0,
         "funding_rate": 0.0,
         "minutes_to_funding": NaN
@@ -1452,11 +1452,11 @@
       "execution_type": "DRY_RUN_FILL",
       "matched_trade": null,
       "factors": {
-        "trend_score": 0.9667379613580928,
-        "mr_z": 0.3219933444945512,
+        "trend_score": 0.9340452603567395,
+        "mr_z": 0.1945831831097097,
         "breakout_risk_down": 0.0,
         "breakout_risk_up": 0.0,
-        "range_pos": 0.368,
+        "range_pos": 0.3639199999999997,
         "vol_score": 0.0,
         "funding_rate": 0.0,
         "minutes_to_funding": NaN
@@ -1476,11 +1476,11 @@
       "execution_type": "DRY_RUN_FILL",
       "matched_trade": null,
       "factors": {
-        "trend_score": 0.9667379613580928,
-        "mr_z": 0.3219933444945512,
+        "trend_score": 0.9340452603567395,
+        "mr_z": 0.1945831831097097,
         "breakout_risk_down": 0.0,
         "breakout_risk_up": 0.0,
-        "range_pos": 0.368,
+        "range_pos": 0.3639199999999997,
         "vol_score": 0.0,
         "funding_rate": 0.0,
         "minutes_to_funding": NaN
@@ -1500,11 +1500,11 @@
       "execution_type": "DRY_RUN_FILL",
       "matched_trade": null,
       "factors": {
-        "trend_score": 0.9667379613580928,
-        "mr_z": 0.3219933444945512,
+        "trend_score": 0.9340452603567395,
+        "mr_z": 0.1945831831097097,
         "breakout_risk_down": 0.0,
         "breakout_risk_up": 0.0,
-        "range_pos": 0.368,
+        "range_pos": 0.3639199999999997,
         "vol_score": 0.0,
         "funding_rate": 0.0,
         "minutes_to_funding": NaN
@@ -1524,11 +1524,11 @@
       "execution_type": "DRY_RUN_FILL",
       "matched_trade": null,
       "factors": {
-        "trend_score": 0.9667379613580928,
-        "mr_z": 0.3219933444945512,
+        "trend_score": 0.9340452603567395,
+        "mr_z": 0.1945831831097097,
         "breakout_risk_down": 0.0,
         "breakout_risk_up": 0.0,
-        "range_pos": 0.368,
+        "range_pos": 0.3639199999999997,
         "vol_score": 0.0,
         "funding_rate": 0.0,
         "minutes_to_funding": NaN
@@ -1548,11 +1548,11 @@
       "execution_type": "DRY_RUN_FILL",
       "matched_trade": null,
       "factors": {
-        "trend_score": 0.9667379613580928,
-        "mr_z": 0.3219933444945512,
+        "trend_score": 0.9340452603567395,
+        "mr_z": 0.1945831831097097,
         "breakout_risk_down": 0.0,
         "breakout_risk_up": 0.0,
-        "range_pos": 0.368,
+        "range_pos": 0.3639199999999997,
         "vol_score": 0.0,
         "funding_rate": 0.0,
         "minutes_to_funding": NaN
@@ -1572,11 +1572,11 @@
       "execution_type": "DRY_RUN_FILL",
       "matched_trade": null,
       "factors": {
-        "trend_score": 0.9667379613580928,
-        "mr_z": 0.3219933444945512,
+        "trend_score": 0.9340452603567395,
+        "mr_z": 0.1945831831097097,
         "breakout_risk_down": 0.0,
         "breakout_risk_up": 0.0,
-        "range_pos": 0.368,
+        "range_pos": 0.3639199999999997,
         "vol_score": 0.0,
         "funding_rate": 0.0,
         "minutes_to_funding": NaN
@@ -1596,11 +1596,11 @@
       "execution_type": "DRY_RUN_FILL",
       "matched_trade": null,
       "factors": {
-        "trend_score": 0.9667379613580928,
-        "mr_z": 0.3219933444945512,
+        "trend_score": 0.9340452603567395,
+        "mr_z": 0.1945831831097097,
         "breakout_risk_down": 0.0,
         "breakout_risk_up": 0.0,
-        "range_pos": 0.368,
+        "range_pos": 0.3639199999999997,
         "vol_score": 0.0,
         "funding_rate": 0.0,
         "minutes_to_funding": NaN
@@ -1620,11 +1620,11 @@
       "execution_type": "DRY_RUN_FILL",
       "matched_trade": null,
       "factors": {
-        "trend_score": 0.9667379613580928,
-        "mr_z": 0.3219933444945512,
+        "trend_score": 0.9340452603567395,
+        "mr_z": 0.1945831831097097,
         "breakout_risk_down": 0.0,
         "breakout_risk_up": 0.0,
-        "range_pos": 0.368,
+        "range_pos": 0.3639199999999997,
         "vol_score": 0.0,
         "funding_rate": 0.0,
         "minutes_to_funding": NaN
@@ -1644,11 +1644,11 @@
       "execution_type": "DRY_RUN_FILL",
       "matched_trade": null,
       "factors": {
-        "trend_score": 0.9667379613580928,
-        "mr_z": 0.3219933444945512,
+        "trend_score": 0.9340452603567395,
+        "mr_z": 0.1945831831097097,
         "breakout_risk_down": 0.0,
         "breakout_risk_up": 0.0,
-        "range_pos": 0.368,
+        "range_pos": 0.3639199999999997,
         "vol_score": 0.0,
         "funding_rate": 0.0,
         "minutes_to_funding": NaN
@@ -1659,12 +1659,12 @@
   "performance": {},
   "system": {
     "bot_status": "RUNNING",
-    "last_heartbeat": "2025-12-23T17:46:00+00:00",
+    "last_heartbeat": "2025-12-23T17:50:00+00:00",
     "expected_bar_interval_seconds": 60,
     "actual_last_bar_seconds_ago": 0,
     "data_feed_status": "CONNECTED",
     "data_feed_latency_ms": 0,
-    "data_feed_last_update": "2025-12-23T17:46:00+00:00",
+    "data_feed_last_update": "2025-12-23T17:50:00+00:00",
     "exchange_api_status": "CONNECTED",
     "exchange_api_latency_ms": 0,
     "exchange_api_last_order": null,

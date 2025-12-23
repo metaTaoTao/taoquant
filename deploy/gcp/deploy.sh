@@ -23,7 +23,7 @@ fi
 # Step 1: Install system dependencies
 echo "📦 Step 1: Installing system dependencies..."
 sudo apt-get update
-sudo apt-get install -y python3.11 python3.11-venv python3-pip git curl
+sudo apt-get install -y python3 python3-venv python3-pip git curl rsync openssl
 
 # Step 2: Create system user (if not exists)
 echo "👤 Step 2: Creating system user 'taoquant'..."
@@ -57,7 +57,7 @@ echo "🐍 Step 4: Setting up Python virtual environment..."
 sudo -u taoquant bash -c "
     cd /opt/taoquant
     if [ ! -d '.venv' ]; then
-        python3.11 -m venv .venv
+        python3 -m venv .venv
     fi
     source .venv/bin/activate
     pip install --upgrade pip

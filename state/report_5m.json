@@ -1,16 +1,16 @@
 {
-  "ts": "2025-12-23T17:44:00+00:00",
+  "ts": "2025-12-23T17:49:00+00:00",
   "symbol": "BTCUSDT",
   "mode": "dry_run",
   "summary": {
-    "current_price": 87774.5,
+    "current_price": 87724.2,
     "net_position": 0.0038420070464771825,
     "avg_cost": 88130.17693438346,
-    "unrealized_pnl": -1.3665306983696723,
+    "unrealized_pnl": -1.5597836528074822,
     "realized_pnl": 3.798832488861759,
-    "equity": 101.63852444282043,
+    "equity": 101.44527148838262,
     "cash": -235.591723058191,
-    "effective_leverage": 3.317937261975204,
+    "effective_leverage": 3.3223529258844824,
     "fees_est": 0.7937773476718307
   },
   "blotter_tail": [
