@@ -611,6 +611,16 @@
         </div>
     </div>
 
+    <!-- Reconciliation Status (Live Mode Only) -->
+    <div id="reconciliation-card" class="card" style="display: none;">
+        <div class="card-header">Exchange Reconciliation</div>
+        <div class="card-row">
+            <span class="card-label">Status</span>
+            <span class="badge badge-success" id="reconciliation-status">OK</span>
+        </div>
+        <div id="reconciliation-details"></div>
+    </div>
+
     <!-- Active Limit Orders -->
     <h2 class="section-header">Active Limit Orders</h2>
     <div class="table-container">
@@ -924,6 +934,60 @@
                         setSignedColor(dailyEl, p.daily_pnl);
                     }
                     document.getElementById('total-trades').textContent = p.total_trades || 0;
+
+                    // Update Reconciliation status (Live mode only)
+                    if (p.reconciliation) {
+                        const reconCard = document.getElementById('reconciliation-card');
+                        const reconStatus = document.getElementById('reconciliation-status');
+                        const reconDetails = document.getElementById('reconciliation-details');
+                        if (reconCard && reconStatus && reconDetails) {
+                            reconCard.style.display = 'block';
+                            const status = p.reconciliation.status || 'UNKNOWN';
+                            reconStatus.textContent = status;
+                            reconStatus.className = status === 'OK' ? 'badge badge-success' : 'badge badge-warning';
+                            
+                            let detailsHTML = '';
+                            if (p.reconciliation.exchange_long !== undefined) {
+                                detailsHTML += `<div class="card-row">
+                                    <span class="card-label">Exchange Long</span>
+                                    <span class="card-value-inline">${formatNumber(p.reconciliation.exchange_long, 6)} BTC</span>
+                                </div>
+                                <div class="card-row">
+                                    <span class="card-label">Ledger Long</span>
+                                    <span class="card-value-inline">${formatNumber(p.reconciliation.ledger_long, 6)} BTC</span>
+                                </div>`;
+                                if (p.reconciliation.drift !== undefined) {
+                                    const driftColor = Math.abs(p.reconciliation.drift) > 0.0001 ? 'text-orange' : 'text-green';
+                                    detailsHTML += `<div class="card-row">
+                                        <span class="card-label">Drift</span>
+                                        <span class="card-value-inline ${driftColor}">${formatNumber(p.reconciliation.drift, 6)} BTC (${formatPercent(p.reconciliation.drift_pct / 100, 4)})</span>
+                                    </div>`;
+                                }
+                            }
+                            if (p.reconciliation.exchange_short !== undefined) {
+                                detailsHTML += `<div class="card-row">
+                                    <span class="card-label">Exchange Short</span>
+                                    <span class="card-value-inline">${formatNumber(p.reconciliation.exchange_short, 6)} BTC</span>
+                                </div>
+                                <div class="card-row">
+                                    <span class="card-label">Ledger Short</span>
+                                    <span class="card-value-inline">${formatNumber(p.reconciliation.ledger_short, 6)} BTC</span>
+                                </div>
+                                <div class="card-row">
+                                    <span class="card-label">Drift Long</span>
+                                    <span class="card-value-inline ${Math.abs(p.reconciliation.drift_long) > 0.0001 ? 'text-orange' : 'text-green'}">${formatNumber(p.reconciliation.drift_long, 6)} BTC</span>
+                                </div>
+                                <div class="card-row">
+                                    <span class="card-label">Drift Short</span>
+                                    <span class="card-value-inline ${Math.abs(p.reconciliation.drift_short) > 0.0001 ? 'text-orange' : 'text-green'}">${formatNumber(p.reconciliation.drift_short, 6)} BTC</span>
+                                </div>`;
+                            }
+                            reconDetails.innerHTML = detailsHTML;
+                        }
+                    } else {
+                        const reconCard = document.getElementById('reconciliation-card');
+                        if (reconCard) reconCard.style.display = 'none';
+                    }
                 }
 
                 // Update Position section

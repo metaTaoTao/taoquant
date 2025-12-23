@@ -1019,6 +1019,33 @@ class BitgetLiveRunner:
                         f"(d_long={d_long:+.8f}, d_short={d_short:+.8f})"
                     )
 
+            # Reconciliation data (exchange vs internal ledger)
+            reconciliation = {}
+            if not bool(self.dry_run):
+                if self.market_type == "spot":
+                    drift = float(exch_long) - float(ledger_holdings)
+                    reconciliation = {
+                        "exchange_long": exch_long,
+                        "ledger_long": ledger_holdings,
+                        "drift": drift,
+                        "drift_pct": (drift / ledger_holdings * 100) if ledger_holdings > 0 else 0.0,
+                        "status": "OK" if abs(drift) <= 1e-6 else "DRIFT",
+                    }
+                else:
+                    d_long = float(exch_long) - float(ledger_holdings)
+                    d_short = float(exch_short) - float(ledger_short)
+                    reconciliation = {
+                        "exchange_long": exch_long,
+                        "exchange_short": exch_short,
+                        "ledger_long": ledger_holdings,
+                        "ledger_short": ledger_short,
+                        "drift_long": d_long,
+                        "drift_short": d_short,
+                        "drift_long_pct": (d_long / ledger_holdings * 100) if ledger_holdings > 0 else 0.0,
+                        "drift_short_pct": (d_short / ledger_short * 100) if ledger_short > 0 else 0.0,
+                        "status": "OK" if abs(d_long) <= 1e-6 and abs(d_short) <= 1e-6 else "DRIFT",
+                    }
+
             return {
                 "equity": total_equity,
                 "cash": available_balance,
@@ -1027,6 +1054,7 @@ class BitgetLiveRunner:
                 "short_holdings": ledger_short,
                 "unrealized_pnl": unrealized_pnl,
                 "daily_pnl": 0.0,  # Will be updated by algorithm
+                "reconciliation": reconciliation if reconciliation else None,
             }
 
         except Exception as e:

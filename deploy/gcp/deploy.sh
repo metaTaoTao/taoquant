@@ -39,18 +39,66 @@ echo "📁 Step 3: Setting up project directory..."
 sudo mkdir -p /opt/taoquant
 sudo chown -R taoquant:taoquant /opt/taoquant
 
-# Copy project files (if deploying from local or /tmp)
-if [ -d "/tmp/taoquant-source" ]; then
-    echo "📋 Copying project files from /tmp/taoquant-source..."
-    sudo -u taoquant rsync -av --exclude='.git' --exclude='__pycache__' --exclude='*.pyc' \
-        --exclude='.venv' --exclude='state/*.json' --exclude='state/*.jsonl' \
-        /tmp/taoquant-source/ /opt/taoquant/
-elif [ -d "$PROJECT_ROOT" ] && [ "$PROJECT_ROOT" != "/opt/taoquant" ]; then
-    echo "📋 Copying project files from $PROJECT_ROOT..."
-    sudo -u taoquant rsync -av --exclude='.git' --exclude='__pycache__' --exclude='*.pyc' \
-        --exclude='.venv' --exclude='state/*.json' --exclude='state/*.jsonl' \
-        "$PROJECT_ROOT/" /opt/taoquant/
+# Clone or update from GitHub (preferred method)
+GITHUB_REPO="${TAOQUANT_GITHUB_REPO:-https://github.com/metaTaoTao/taoquant.git}"
+if [ -d "/opt/taoquant/.git" ]; then
+    echo "📋 Updating existing git repository..."
+    sudo -u taoquant bash -c "
+        cd /opt/taoquant
+        git fetch origin
+        git reset --hard origin/master || git reset --hard origin/main
+    "
+    echo "✅ Repository updated"
+elif [ ! -d "/opt/taoquant" ] || [ -z "$(ls -A /opt/taoquant 2>/dev/null)" ]; then
+    echo "📋 Cloning repository from GitHub..."
+    # Backup critical directories before removing
+    if [ -d "/opt/taoquant" ]; then
+        echo "💾 Backing up critical data (pgdata, .env, state, config)..."
+        sudo mkdir -p /tmp/taoquant-backup-$(date +%Y%m%d-%H%M%S)
+        BACKUP_DIR="/tmp/taoquant-backup-$(date +%Y%m%d-%H%M%S)"
+        [ -d "/opt/taoquant/pgdata" ] && sudo cp -r /opt/taoquant/pgdata "$BACKUP_DIR/" 2>/dev/null || true
+        [ -f "/opt/taoquant/.env" ] && sudo cp /opt/taoquant/.env "$BACKUP_DIR/" 2>/dev/null || true
+        [ -d "/opt/taoquant/state" ] && sudo cp -r /opt/taoquant/state "$BACKUP_DIR/" 2>/dev/null || true
+        [ -f "/opt/taoquant/config_bitget_live.json" ] && sudo cp /opt/taoquant/config_bitget_live.json "$BACKUP_DIR/" 2>/dev/null || true
+        [ -d "/opt/taoquant/.venv" ] && sudo cp -r /opt/taoquant/.venv "$BACKUP_DIR/" 2>/dev/null || true
+        echo "✅ Backup created at $BACKUP_DIR"
+    fi
+    # Remove everything except critical directories
+    sudo find /opt/taoquant -mindepth 1 -maxdepth 1 ! -name 'pgdata' ! -name '.venv' -exec rm -rf {} + 2>/dev/null || true
+    sudo -u taoquant git clone "$GITHUB_REPO" /opt/taoquant
+    # Restore critical directories
+    if [ -d "$BACKUP_DIR" ]; then
+        echo "📦 Restoring critical data..."
+        [ -d "$BACKUP_DIR/pgdata" ] && sudo mv "$BACKUP_DIR/pgdata" /opt/taoquant/ 2>/dev/null || true
+        [ -f "$BACKUP_DIR/.env" ] && sudo mv "$BACKUP_DIR/.env" /opt/taoquant/ 2>/dev/null || true
+        [ -d "$BACKUP_DIR/state" ] && sudo cp -r "$BACKUP_DIR/state"/* /opt/taoquant/state/ 2>/dev/null || true
+        [ -f "$BACKUP_DIR/config_bitget_live.json" ] && sudo mv "$BACKUP_DIR/config_bitget_live.json" /opt/taoquant/ 2>/dev/null || true
+        [ -d "$BACKUP_DIR/.venv" ] && sudo mv "$BACKUP_DIR/.venv" /opt/taoquant/ 2>/dev/null || true
+        echo "✅ Critical data restored"
+    fi
+    echo "✅ Repository cloned"
+else
+    echo "⚠️  /opt/taoquant exists but is not a git repository"
+    echo "   Options:"
+    echo "   1. Remove /opt/taoquant and re-run deploy.sh (will clone fresh)"
+    echo "   2. Or manually: cd /opt/taoquant && sudo -u taoquant git init && git remote add origin $GITHUB_REPO"
+    echo ""
+    # Fallback: copy from /tmp or local if git clone not possible
+    if [ -d "/tmp/taoquant-source" ]; then
+        echo "📋 Copying project files from /tmp/taoquant-source (fallback)..."
+        sudo -u taoquant rsync -av --exclude='.git' --exclude='__pycache__' --exclude='*.pyc' \
+            --exclude='.venv' --exclude='state/*.json' --exclude='state/*.jsonl' \
+            /tmp/taoquant-source/ /opt/taoquant/
+    elif [ -d "$PROJECT_ROOT" ] && [ "$PROJECT_ROOT" != "/opt/taoquant" ]; then
+        echo "📋 Copying project files from $PROJECT_ROOT (fallback)..."
+        sudo -u taoquant rsync -av --exclude='.git' --exclude='__pycache__' --exclude='*.pyc' \
+            --exclude='.venv' --exclude='state/*.json' --exclude='state/*.jsonl' \
+            "$PROJECT_ROOT/" /opt/taoquant/
+    fi
 fi
+
+# Ensure proper ownership
+sudo chown -R taoquant:taoquant /opt/taoquant
 
 # Step 4: Setup Python virtual environment
 echo "🐍 Step 4: Setting up Python virtual environment..."
