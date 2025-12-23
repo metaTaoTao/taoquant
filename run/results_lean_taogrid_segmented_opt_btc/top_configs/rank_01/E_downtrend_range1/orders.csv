@@ -1,2 +1,0 @@
-timestamp,direction,size,price,level,market_price,cost,commission,slippage,mr_z,trend_score,breakout_risk_down,breakout_risk_up,range_pos,funding_rate,vol_score
-2025-11-14 14:36:00+00:00,buy,0.0023667064696484743,95943.0,0,96101.4,227.11433260124707,0.045413783763496716,0.0,0.47229609001803446,-0.6104666347558897,0.0,0.0,0.1500999999999996,0.0,1.0

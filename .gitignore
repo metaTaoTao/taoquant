@@ -87,3 +87,23 @@ lpt6
 lpt7
 lpt8
 lpt9
+# ===== runtime/state/logs (do NOT commit) =====
+state/*.json
+state/*.jsonl
+state/*.log
+logs/
+*.log
+
+# ===== backtest outputs (huge, do NOT commit) =====
+run/backtest_output.log
+run/results*/
+run/results_*/
+run/run/results*/
+run/run/results_*/
+algorithms/**/run/results*/
+algorithms/**/run/results_*/
+
+# ===== local caches =====
+data/cache/*.parquet
+scripts/data/cache/
+scripts/backtest/results/
