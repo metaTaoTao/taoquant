@@ -587,6 +587,12 @@ class BitgetLiveRunner:
         # IMPORTANT: pass current price so we don't place crossing orders at bootstrap
         # (otherwise BUY above market / SELL below market can execute immediately as taker).
         # Also skip safety limits during bootstrap to ensure initial grid is fully placed.
+        
+        # Apply active_buy_levels filter BEFORE placing orders (consistent with backtest)
+        if self.active_buy_levels is not None and self.active_buy_levels > 0:
+            self._apply_active_buy_levels_filter(current_price=float(last_px), keep_levels=int(self.active_buy_levels))
+            self.logger.log_info(f"[BOOTSTRAP] Applied active_buy_levels filter: keeping {self.active_buy_levels} buy levels")
+        
         self.logger.log_info(f"[BOOTSTRAP] Placing initial grid orders at current_price=${last_px:.2f} (bypassing safety limits)")
         self._sync_exchange_orders(current_price=float(last_px), skip_safety_limits=True)
         
