@@ -1485,6 +1485,21 @@ class BitgetLiveRunner:
             if coid.startswith(self._client_oid_prefix):
                 open_by_client[coid] = oo
 
+        # Log sync state for debugging (every 5 minutes or when mismatch)
+        desired_buy_levels = sorted([int(k.split(":")[1]) for k in desired.keys() if k.startswith("buy:")])
+        open_buy_levels = []
+        for coid in open_by_client.keys():
+            parts = coid[len(self._client_oid_prefix):].split("_")
+            if len(parts) >= 2 and parts[0] == "buy":
+                open_buy_levels.append(int(parts[1]))
+        open_buy_levels = sorted(open_buy_levels)
+        
+        if desired_buy_levels != open_buy_levels:
+            self.logger.log_info(
+                f"[SYNC_STATE] desired_buy_levels={desired_buy_levels} open_buy_levels={open_buy_levels} "
+                f"cp={cp:.2f if cp else 'NA'}"
+            )
+
         # Cancel extra bot orders not in desired set
         for coid, oo in list(open_by_client.items()):
             suffix = coid[len(self._client_oid_prefix):]
@@ -1500,6 +1515,11 @@ class BitgetLiveRunner:
                 oid = str(oo.get("order_id") or "")
                 if oid:
                     if self._safety_can_cancel(now=now_ts):
+                        # Log cancellation with reason
+                        self.logger.log_warning(
+                            f"[ORDER_CANCEL] {direction.upper()} L{level_index+1} not in desired set "
+                            f"(desired_keys={len(desired)}, order_id={oid}, client_oid={coid})"
+                        )
                         self.execution_engine.cancel_order(self.symbol, oid)
                         self._safety_mark_cancel()
                         # Throttle API calls (Bitget limit: 10 req/s)
