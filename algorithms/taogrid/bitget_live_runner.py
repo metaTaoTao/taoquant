@@ -2009,15 +2009,17 @@ class BitgetLiveRunner:
             client_oid = self._make_client_oid(direction, level_index, leg, increment_version=True)
 
             # Derivatives position semantics for Bitget swap:
-            # 
-            # IMPORTANT: Bitget swap in one-way mode does NOT accept tradeSide/holdSide
-            # for limit orders that reduce position. The "No position to close" error
-            # occurs because Bitget validates reduceOnly/close orders immediately.
             #
-            # Solution: For SELL limit orders (closing long), don't specify tradeSide/holdSide.
-            # Let Bitget automatically treat the order as position-reducing when it fills.
-            # 
-            # Only use tradeSide for BUY orders (opening) and short overlay orders.
+            # IMPORTANT: Bitget swap in unilateral position mode REQUIRES tradeSide parameter
+            # for all orders to distinguish between opening and closing positions.
+            # Error 40774 "The order type for unilateral position must also be the unilateral position type."
+            # occurs if tradeSide is missing or incorrect.
+            #
+            # Correct tradeSide values:
+            # - BUY to open long: tradeSide='open'
+            # - SELL to close long: tradeSide='close'
+            # - SELL to open short: tradeSide='open'
+            # - BUY to close short: tradeSide='close'
             params: Dict[str, Any] = {}
             if self.market_type in ("swap", "future", "futures"):
                 if leg == "short_cover" and direction == "buy":
@@ -2029,8 +2031,9 @@ class BitgetLiveRunner:
                 elif leg is None and direction == "buy":
                     # Open long position (grid BUY) - use tradeSide=open
                     params["tradeSide"] = "open"
-                # For leg is None and direction == "sell" (grid SELL to close long):
-                # DON'T specify tradeSide - let Bitget handle it automatically
+                elif leg is None and direction == "sell":
+                    # Close long position (grid SELL) - MUST use tradeSide=close
+                    params["tradeSide"] = "close"
 
             # Determine trigger for this order placement
             place_trigger = "bootstrap" if skip_safety_limits else "strategy"
