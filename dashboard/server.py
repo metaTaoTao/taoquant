@@ -43,8 +43,14 @@ _DB = None
 try:
     if PostgresStore is not None:
         # Check if DB is explicitly disabled via environment variable
-        db_disable = os.getenv("TAOQUANT_DB_DISABLE", "").strip().lower()
-        if db_disable not in ("1", "true", "yes", "y", "on"):
+        # Check both with and without prefix to be safe
+        db_disable = (
+            os.getenv("TAOQUANT_DB_DISABLE", "").strip().lower() or
+            os.getenv("DB_DISABLE", "").strip().lower()
+        )
+        if db_disable in ("1", "true", "yes", "y", "on"):
+            _DB = None  # Explicitly disabled
+        else:
             _DB = PostgresStore.from_env()
 except Exception:
     # Silently ignore DB connection errors - dashboard should work without DB

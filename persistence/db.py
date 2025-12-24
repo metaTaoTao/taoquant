@@ -51,13 +51,20 @@ class PostgresStore:
         if psycopg is None or ConnectionPool is None:
             raise RuntimeError("psycopg is not installed. Install `psycopg[binary]`.")
         self.cfg = cfg
-        self._pool = ConnectionPool(
-            conninfo=cfg.dsn,
-            min_size=int(cfg.min_size),
-            max_size=int(cfg.max_size),
-            timeout=cfg.timeout,
-            kwargs={"autocommit": True},
-        )
+        # Check if DB is disabled before creating connection pool
+        if _env_truthy("TAOQUANT_DB_DISABLE"):
+            raise RuntimeError("Database is disabled via TAOQUANT_DB_DISABLE")
+        try:
+            self._pool = ConnectionPool(
+                conninfo=cfg.dsn,
+                min_size=int(cfg.min_size),
+                max_size=int(cfg.max_size),
+                timeout=cfg.timeout,
+                kwargs={"autocommit": True},
+            )
+        except Exception as e:
+            # If connection pool creation fails, raise to be caught by from_env()
+            raise RuntimeError(f"Failed to create connection pool: {e}") from e
 
     @staticmethod
     def from_env(prefix: str = "TAOQUANT_DB_") -> Optional["PostgresStore"]:
@@ -85,13 +92,17 @@ class PostgresStore:
         if not dsn:
             return None
 
+        # Double-check disable flag before creating connection pool
+        if _env_truthy(f"{prefix}DISABLE") or _env_truthy("TAOQUANT_DB_DISABLE"):
+            return None
+        
         min_size = int(os.getenv(f"{prefix}MIN_SIZE", "0"))  # Default to 0 to avoid immediate connection attempts
         max_size = int(os.getenv(f"{prefix}MAX_SIZE", "5"))
         timeout = float(os.getenv(f"{prefix}TIMEOUT", "5"))
         try:
             return PostgresStore(PostgresConfig(dsn=dsn, min_size=min_size, max_size=max_size, timeout=timeout))
         except Exception:
-            # Silently fail if connection pool creation fails (e.g., DB is down)
+            # Silently fail if connection pool creation fails (e.g., DB is down or disabled)
             # This allows the application to run without DB
             return None
 
