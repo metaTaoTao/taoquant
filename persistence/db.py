@@ -24,6 +24,11 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _env_truthy(name: str) -> bool:
+    v = (os.getenv(name) or "").strip().lower()
+    return v in ("1", "true", "yes", "y", "on")
+
+
 @dataclass(frozen=True)
 class PostgresConfig:
     dsn: str
@@ -63,6 +68,11 @@ class PostgresStore:
         - TAOQUANT_DB_DSN (recommended)
         - or TAOQUANT_DB_HOST/PORT/NAME/USER/PASSWORD
         """
+        # Hard disable: allow trading/dashboard to run without any DB attempts.
+        # This avoids repeated psycopg_pool connection errors during debugging.
+        if _env_truthy(f"{prefix}DISABLE") or _env_truthy("TAOQUANT_DB_DISABLE"):
+            return None
+
         dsn = os.getenv(f"{prefix}DSN") or os.getenv("TAOQUANT_DB_DSN")
         if not dsn:
             host = os.getenv(f"{prefix}HOST")
@@ -75,10 +85,15 @@ class PostgresStore:
         if not dsn:
             return None
 
-        min_size = int(os.getenv(f"{prefix}MIN_SIZE", "1"))
+        min_size = int(os.getenv(f"{prefix}MIN_SIZE", "0"))  # Default to 0 to avoid immediate connection attempts
         max_size = int(os.getenv(f"{prefix}MAX_SIZE", "5"))
         timeout = float(os.getenv(f"{prefix}TIMEOUT", "5"))
-        return PostgresStore(PostgresConfig(dsn=dsn, min_size=min_size, max_size=max_size, timeout=timeout))
+        try:
+            return PostgresStore(PostgresConfig(dsn=dsn, min_size=min_size, max_size=max_size, timeout=timeout))
+        except Exception:
+            # Silently fail if connection pool creation fails (e.g., DB is down)
+            # This allows the application to run without DB
+            return None
 
     def close(self) -> None:
         try:
@@ -87,15 +102,22 @@ class PostgresStore:
             return
 
     def _exec(self, query: str, params: Optional[Dict[str, Any]] = None) -> None:
-        with self._pool.connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute(query, params or {})
+        try:
+            with self._pool.connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(query, params or {})
+        except Exception:
+            # Best-effort: never crash trading loop due to DB connectivity.
+            return
 
     def _fetchone(self, query: str, params: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
-        with self._pool.connection() as conn:
-            with conn.cursor(row_factory=dict_row) as cur:
-                cur.execute(query, params or {})
-                return cur.fetchone()
+        try:
+            with self._pool.connection() as conn:
+                with conn.cursor(row_factory=dict_row) as cur:
+                    cur.execute(query, params or {})
+                    return cur.fetchone()
+        except Exception:
+            return None
 
     def _exec_ignore_duplicate(self, query: str, params: Dict[str, Any]) -> None:
         try:

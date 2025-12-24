@@ -38,11 +38,16 @@ MARKET_BARS_FILE = Path(_env("TAOQUANT_MARKET_BARS_FILE", str(STATE_DIR / "marke
 DEFAULT_BOT_ID = _env("TAOQUANT_BOT_ID", "")
 
 # Optional DB (best-effort)
+# Disable DB if TAOQUANT_DB_DISABLE is set to avoid connection errors
 _DB = None
 try:
     if PostgresStore is not None:
-        _DB = PostgresStore.from_env()
+        # Check if DB is explicitly disabled via environment variable
+        db_disable = os.getenv("TAOQUANT_DB_DISABLE", "").strip().lower()
+        if db_disable not in ("1", "true", "yes", "y", "on"):
+            _DB = PostgresStore.from_env()
 except Exception:
+    # Silently ignore DB connection errors - dashboard should work without DB
     _DB = None
 
 

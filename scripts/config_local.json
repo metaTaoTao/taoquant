@@ -1,0 +1,6 @@
+{
+    "dashboard": {
+        "url": "http://34.158.55.6:8000",
+        "token": "YOUR_DASHBOARD_TOKEN_HERE"
+    }
+}

@@ -9,6 +9,7 @@ Group=taoquant
 WorkingDirectory=/opt/taoquant
 Environment="PATH=/opt/taoquant/.venv/bin:/usr/local/bin:/usr/bin:/bin"
 EnvironmentFile=/opt/taoquant/.env
+Environment="TAOQUANT_DB_DISABLE=1"
 
 # Main command
 # Note: API credentials are read from environment variables (BITGET_API_KEY, etc.)

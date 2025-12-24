@@ -715,6 +715,10 @@ class BitgetLiveRunner:
         if not fills_rows:
             return
 
+        # Skip DB writes if DB store is not available
+        if self._db_store is None:
+            return
+
         # Persist fills (idempotent on trade_id when available)
         try:
             self._db_store.insert_trade_fills(bot_id=bot_id, rows=fills_rows)
@@ -2773,6 +2777,10 @@ class BitgetLiveRunner:
             hb_status = "EXCHANGE_API_DEGRADED"
 
         safe_status = self._sanitize_jsonable(status)
+
+        # Skip DB writes if DB store is not available
+        if self._db_store is None:
+            return
 
         # Upsert current state snapshot
         self._db_store.upsert_bot_state_current(
