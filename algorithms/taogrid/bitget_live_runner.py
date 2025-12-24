@@ -615,7 +615,10 @@ class BitgetLiveRunner:
         
         self.logger.log_info(f"[BOOTSTRAP] Placing initial grid orders at current_price=${last_px:.2f} (bypassing safety limits)")
         self._sync_exchange_orders(current_price=float(last_px), skip_safety_limits=True)
-        
+
+        # Reconcile positions: sync exchange positions to ledger and place hedge orders
+        self._reconcile_positions_on_startup(current_price=float(last_px))
+
         # Verify orders were placed (best-effort check)
         try:
             open_orders = self.execution_engine.get_open_orders(self.symbol) or []
@@ -630,6 +633,250 @@ class BitgetLiveRunner:
                     )
         except Exception as e:
             self.logger.log_warning(f"[BOOTSTRAP] Could not verify open orders: {e}")
+
+    def _reconcile_positions_on_startup(self, current_price: float) -> None:
+        """
+        Reconcile positions on startup: sync exchange positions to ledger and place hedge orders.
+
+        This handles the case where:
+        1. Bot was restarted and lost tracking of filled orders
+        2. Positions exist on exchange but not in ledger
+        3. Need to place hedge orders for unhedged positions
+
+        Strategy:
+        - Get positions from exchange (with entry_price)
+        - Calculate position drift vs ledger
+        - For untracked positions:
+          * Find nearest grid level based on entry_price
+          * Update ledger to record the position
+          * Place corresponding hedge SELL order (with proper spacing)
+
+        Parameters
+        ----------
+        current_price : float
+            Current market price for validation
+        """
+        if self.dry_run:
+            # In dry-run, positions are simulated, no reconciliation needed
+            return
+
+        try:
+            # 1. Get positions from exchange
+            exchange_positions = self.execution_engine.get_positions(self.symbol)
+
+            # 2. Get ledger positions
+            ledger_long = float(self._get_holdings_from_ledger() or 0.0)
+            ledger_short = 0.0  # TODO: track short positions if needed
+
+            # 3. Calculate drift
+            exchange_long = 0.0
+            exchange_short = 0.0
+            for pos in exchange_positions:
+                side = str(pos.get('side', '')).lower()
+                qty = float(pos.get('quantity', 0.0))
+                if side == 'long':
+                    exchange_long += qty
+                elif side == 'short':
+                    exchange_short += qty
+
+            drift_long = exchange_long - ledger_long
+            drift_short = exchange_short - ledger_short
+
+            # 4. Log drift detection
+            if abs(drift_long) > 1e-8 or abs(drift_short) > 1e-8:
+                self.logger.log_warning(
+                    f"[POSITION_RECOVERY] Detected position drift: "
+                    f"exchange_long={exchange_long:.8f} vs ledger_long={ledger_long:.8f} (drift={drift_long:+.8f}), "
+                    f"exchange_short={exchange_short:.8f} vs ledger_short={ledger_short:.8f} (drift={drift_short:+.8f})"
+                )
+
+                # 5. Reconcile each position
+                for pos in exchange_positions:
+                    side = str(pos.get('side', '')).lower()
+                    qty = float(pos.get('quantity', 0.0))
+                    entry_price = pos.get('entry_price')
+
+                    if qty <= 1e-8:
+                        continue
+
+                    if entry_price is None or entry_price <= 0:
+                        self.logger.log_warning(
+                            f"[POSITION_RECOVERY] Position has no entry_price, skipping: "
+                            f"side={side} qty={qty:.8f}"
+                        )
+                        continue
+
+                    entry_price = float(entry_price)
+
+                    # Only handle long positions for now (grid strategy is long-biased)
+                    if side == 'long':
+                        self._recover_long_position(
+                            qty=qty,
+                            entry_price=entry_price,
+                            current_price=current_price
+                        )
+            else:
+                self.logger.log_info(
+                    f"[POSITION_RECOVERY] No drift detected: "
+                    f"exchange matches ledger (long={exchange_long:.8f}, short={exchange_short:.8f})"
+                )
+
+        except Exception as e:
+            self.logger.log_error(f"[POSITION_RECOVERY] Error during reconciliation: {e}", exc_info=True)
+
+    def _recover_long_position(self, qty: float, entry_price: float, current_price: float) -> None:
+        """
+        Recover a long position: update ledger and place hedge SELL order.
+
+        Parameters
+        ----------
+        qty : float
+            Position quantity (BTC)
+        entry_price : float
+            Average entry price
+        current_price : float
+            Current market price
+        """
+        try:
+            # Get grid configuration
+            buy_levels = self.algorithm.grid_manager.buy_levels
+            sell_levels = self.algorithm.grid_manager.sell_levels
+
+            if buy_levels is None or sell_levels is None or len(buy_levels) == 0:
+                self.logger.log_warning(
+                    f"[POSITION_RECOVERY] Grid not initialized, cannot recover position"
+                )
+                return
+
+            # Find nearest buy level to entry_price
+            nearest_buy_idx = min(
+                range(len(buy_levels)),
+                key=lambda i: abs(buy_levels[i] - entry_price)
+            )
+            nearest_buy_price = buy_levels[nearest_buy_idx]
+
+            # Calculate target sell price (with spacing to ensure profit)
+            # Get current spacing from grid manager
+            spacing_pct = 0.0016  # Default fallback
+            try:
+                # Try to get actual spacing from grid calculation
+                from analytics.indicators.grid_generator import calculate_grid_spacing
+                import pandas as pd
+                # Use a simple estimate if ATR not available
+                spacing_pct = float(self.config.min_return) + 2 * float(self.config.maker_fee)
+            except Exception:
+                pass
+
+            sell_price_target = entry_price * (1.0 + spacing_pct)
+
+            # Find nearest sell level to target
+            if nearest_buy_idx < len(sell_levels):
+                # Use corresponding sell level (buy[i] -> sell[i])
+                sell_idx = nearest_buy_idx
+                sell_price = sell_levels[sell_idx]
+            else:
+                # Fallback: find any nearest sell level
+                sell_idx = min(
+                    range(len(sell_levels)),
+                    key=lambda i: abs(sell_levels[i] - sell_price_target)
+                )
+                sell_price = sell_levels[sell_idx]
+
+            # Calculate actual spacing achieved
+            actual_spacing_pct = (sell_price / entry_price) - 1.0
+
+            # Validate that sell_price > entry_price (must have profit)
+            if sell_price <= entry_price:
+                self.logger.log_warning(
+                    f"[POSITION_RECOVERY] SELL price ${sell_price:.2f} <= entry ${entry_price:.2f}, "
+                    f"this would result in loss! Using target price instead."
+                )
+                sell_price = sell_price_target
+                # Find nearest level again
+                sell_idx = min(
+                    range(len(sell_levels)),
+                    key=lambda i: abs(sell_levels[i] - sell_price)
+                )
+                sell_price = sell_levels[sell_idx]
+                actual_spacing_pct = (sell_price / entry_price) - 1.0
+
+            # CRITICAL: Check if current price already passed the sell target
+            # If so, use market order to close position immediately (lock in profit)
+            buffer_pct = 0.0005  # 0.05% buffer (same as eligibility check)
+            if current_price >= sell_price * (1.0 - buffer_pct):
+                # Price already passed sell target - close with market order
+                unrealized_profit = (current_price - entry_price) * qty
+                unrealized_profit_pct = (current_price / entry_price) - 1.0
+
+                self.logger.log_warning(
+                    f"[POSITION_RECOVERY] Current price ${current_price:.2f} already >= target SELL ${sell_price:.2f}! "
+                    f"Unrealized profit: ${unrealized_profit:.2f} ({unrealized_profit_pct:.2%}). "
+                    f"Closing position with MARKET order to lock profit."
+                )
+
+                # Close position with market order
+                try:
+                    # Place market SELL order to close position
+                    order_result = self.execution_engine.place_order(
+                        symbol=self.symbol,
+                        side='sell',
+                        quantity=qty,
+                        price=None,  # Market order
+                        order_type='market',
+                        client_order_id=f"{self._client_oid_prefix}recovery_close_{int(time.time())}",
+                        params={'tradeSide': 'close'} if self.market_type in ('swap', 'future', 'futures') else None
+                    )
+
+                    if order_result and order_result.get("order_id"):
+                        self.logger.log_warning(
+                            f"[POSITION_RECOVERY] Market order placed to close position: "
+                            f"qty={qty:.8f} @ market (est. ${current_price:.2f}), "
+                            f"order_id={order_result.get('order_id')}"
+                        )
+                        # Update ledger to reflect closed position
+                        # (actual fill will be processed in next _process_filled_orders cycle)
+                        return
+                    else:
+                        self.logger.log_error(
+                            f"[POSITION_RECOVERY] Failed to place market order, "
+                            f"will fall back to limit order"
+                        )
+                except Exception as e:
+                    self.logger.log_error(
+                        f"[POSITION_RECOVERY] Error placing market order: {e}, "
+                        f"will fall back to limit order",
+                        exc_info=True
+                    )
+                    # Fall through to limit order placement
+
+            # Update ledger to track this position
+            self.algorithm.grid_manager.add_buy_position(
+                buy_level_index=nearest_buy_idx,
+                size=qty,
+                buy_price=entry_price
+            )
+
+            # Place hedge SELL order
+            self.algorithm.grid_manager.place_pending_order(
+                direction='sell',
+                level_index=sell_idx,
+                level_price=sell_price,
+                bar_index=None,
+                leg=None
+            )
+
+            self.logger.log_warning(
+                f"[POSITION_RECOVERY] Recovered long position: "
+                f"{qty:.8f} BTC @ entry=${entry_price:.2f} (nearest_buy_L{nearest_buy_idx+1}@${nearest_buy_price:.2f}) "
+                f"-> placing SELL hedge @ ${sell_price:.2f} (L{sell_idx+1}, "
+                f"target_spacing={spacing_pct:.2%}, actual_spacing={actual_spacing_pct:.2%})"
+            )
+
+            # Sync the hedge order to exchange immediately
+            self._sync_exchange_orders(current_price=current_price, skip_safety_limits=False)
+
+        except Exception as e:
+            self.logger.log_error(f"[POSITION_RECOVERY] Error recovering long position: {e}", exc_info=True)
 
     def _replay_fills_best_effort(self) -> None:
         """
