@@ -1136,6 +1136,75 @@ class BitgetLiveRunner:
                         self.symbol, order_id
                     )
 
+                    # CRITICAL FIX: If get_order_status returns None/error (e.g., Bitget 40109),
+                    # the order likely filled and was cleared from exchange history.
+                    # Strategy: Assume it filled at limit price and trigger hedge logic.
+                    if order_status is None:
+                        # Try to get current price for realistic fill simulation
+                        try:
+                            latest_bar = self.data_source.get_latest_bar(self.symbol, "1m")
+                            current_price = float(latest_bar["close"]) if latest_bar else None
+                        except Exception:
+                            current_price = None
+
+                        # Assume filled at limit price (order_info contains the original order details)
+                        fill_price = float(order_info.get("price", 0.0))
+                        fill_qty = float(order_info.get("quantity", 0.0))
+
+                        if fill_price > 0 and fill_qty > 0:
+                            self.logger.log_warning(
+                                f"[FILL_RECOVERY] order_id={order_id} not in open orders and "
+                                f"get_order_status returned None. Assuming FILLED and triggering hedge. "
+                                f"side={order_info.get('side')} level={order_info.get('level')} "
+                                f"price={fill_price:.2f} qty={fill_qty:.6f}"
+                            )
+
+                            # Create filled_order event to trigger hedge logic
+                            filled_order = {
+                                "direction": order_info.get("side", "").lower(),
+                                "price": fill_price,
+                                "quantity": fill_qty,
+                                "level": int(order_info.get("level", -1)),
+                                "timestamp": datetime.now(timezone.utc),
+                                "leg": order_info.get("leg"),
+                            }
+
+                            # Trigger strategy's fill handler (this will place hedge orders)
+                            self.logger.log_info(
+                                f"[FILL_HEDGE] Calling on_order_filled for {filled_order['direction'].upper()} "
+                                f"L{int(filled_order.get('level', -1))} (recovery) - will place hedge order"
+                            )
+                            self.algorithm.on_order_filled(filled_order)
+
+                            # Log to blotter (best-effort)
+                            try:
+                                notional = fill_qty * fill_price
+                                fee_est = notional * float(getattr(self.config, "maker_fee", 0.0) or 0.0)
+                                portfolio_state = self._get_portfolio_state(current_price=current_price or fill_price)
+                                blotter_event = {
+                                    "ts": pd.Timestamp(datetime.now(timezone.utc)).tz_convert("UTC").isoformat(),
+                                    "symbol": str(self.symbol),
+                                    "side": str(filled_order["direction"]).upper(),
+                                    "level": int(filled_order.get("level", -1)) + 1 if int(filled_order.get("level", -1)) >= 0 else 0,
+                                    "px": fill_price,
+                                    "qty": fill_qty,
+                                    "notional": notional,
+                                    "fee_est": fee_est,
+                                    "leg": (filled_order.get("leg") or "long"),
+                                    "cash": float(portfolio_state.get("cash", 0.0) or 0.0),
+                                    "net_pos": float(portfolio_state.get("holdings", 0.0) or 0.0),
+                                    "unreal": float(portfolio_state.get("unrealized_pnl", 0.0) or 0.0),
+                                }
+                                self._append_blotter_event(blotter_event)
+                            except Exception:
+                                pass
+
+                            filled_orders.append(filled_order)
+
+                        # Remove from pending to stop repeated queries
+                        del self.pending_orders[order_id]
+                        continue
+
                     if order_status:
                         status = order_status.get("status", "").lower()
                         # CCXT often returns "closed" for fully-filled orders.
