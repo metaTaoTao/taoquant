@@ -1173,8 +1173,22 @@ class BitgetLiveRunner:
                                         pnl = (float(filled_order["price"]) - float(buy_price)) * float(msz)
                                         self.algorithm.grid_manager.update_realized_pnl(float(pnl))
 
-                                # Update strategy
+                                # Update strategy (this will place hedge orders)
+                                self.logger.log_info(
+                                    f"[FILL_HEDGE] Calling on_order_filled for {filled_order['direction'].upper()} "
+                                    f"L{int(filled_order.get('level', -1))} - will place hedge order"
+                                )
                                 self.algorithm.on_order_filled(filled_order)
+
+                                # Log pending orders after hedge placement
+                                pending_count_by_side = {}
+                                for po in self.algorithm.grid_manager.pending_limit_orders:
+                                    side = str(po.get('direction', ''))
+                                    pending_count_by_side[side] = pending_count_by_side.get(side, 0) + 1
+                                self.logger.log_info(
+                                    f"[FILL_HEDGE] After on_order_filled: pending_orders = "
+                                    f"BUY:{pending_count_by_side.get('buy', 0)} SELL:{pending_count_by_side.get('sell', 0)}"
+                                )
 
                                 # Dashboard/order blotter (best-effort, in-memory + state/blotter.jsonl)
                                 try:
@@ -1435,9 +1449,21 @@ class BitgetLiveRunner:
 
         # NOTE:
         # active_buy_levels filter is applied in the main loop via `_apply_active_buy_levels_filter`
-        # to keep it reversible (backtest-consistent). Do NOT permanently flip placed flags here.
+        # to keep it reversible (backtest-consistent). DO NOT permanently flip placed flags here.
         pending = list(self.algorithm.grid_manager.pending_limit_orders)
         cp = float(current_price) if current_price is not None else None
+
+        # Log sync start (helps debug hedge order placement)
+        pending_by_side = {}
+        for p in pending:
+            side = str(p.get('direction', ''))
+            placed = bool(p.get('placed', False))
+            key = f"{side}_placed" if placed else f"{side}_not_placed"
+            pending_by_side[key] = pending_by_side.get(key, 0) + 1
+        if not self.dry_run:  # Only log in live mode to avoid spam
+            self.logger.log_info(
+                f"[SYNC_START] cp=${cp:.2f if cp else 0:.2f} pending_orders: {dict(pending_by_side)}"
+            )
 
         desired: Dict[str, dict] = {}
         for o in pending:
@@ -1453,8 +1479,16 @@ class BitgetLiveRunner:
             if cp is not None:
                 buffer_pct = 0.0005  # 0.05% buffer
                 if direction == "buy" and price > cp * (1.0 - buffer_pct):
+                    self.logger.log_warning(
+                        f"[ORDER_SKIP] BUY L{level_index+1} @ ${price:.2f} too close to market (cp=${cp:.2f}, "
+                        f"threshold=${cp * (1.0 - buffer_pct):.2f}) - would execute immediately as taker"
+                    )
                     continue  # Skip buy orders at or too close to current price
                 if direction == "sell" and price < cp * (1.0 + buffer_pct):
+                    self.logger.log_warning(
+                        f"[ORDER_SKIP] SELL L{level_index+1} @ ${price:.2f} too close to market (cp=${cp:.2f}, "
+                        f"threshold=${cp * (1.0 + buffer_pct):.2f}) - would execute immediately as taker"
+                    )
                     continue  # Skip sell orders at or too close to current price
 
             desired[self._order_key(direction, level_index, leg)] = o
