@@ -175,6 +175,8 @@ class BitgetLiveRunner:
         # Bitget rejects duplicate clientOid even if previous order failed/cancelled
         self._startup_ts: int = int(time.time())
         self._client_oid_prefix: str = f"tg_{self.symbol}_{self._startup_ts}_"
+        # Version counter for each order key to ensure unique clientOid on re-placement
+        self._order_version: Dict[str, int] = {}
         # Rolling bars window for factor computation
         self._recent_bars: Optional[pd.DataFrame] = None
         self._recent_bars_maxlen: int = 3000
@@ -1216,9 +1218,23 @@ class BitgetLiveRunner:
         leg_tag = leg if leg is not None else "long"
         return f"{direction}:{int(level_index)}:{leg_tag}"
 
-    def _make_client_oid(self, direction: str, level_index: int, leg: Optional[str]) -> str:
+    def _make_client_oid(self, direction: str, level_index: int, leg: Optional[str], increment_version: bool = False) -> str:
+        """Generate unique client order ID.
+        
+        Parameters
+        ----------
+        increment_version : bool
+            If True, increment version counter for this order key (use when placing new order).
+            If False, return current version (use for lookups).
+        """
         leg_tag = leg if leg is not None else "long"
-        return f"{self._client_oid_prefix}{direction}_{int(level_index)}_{leg_tag}"
+        order_key = f"{direction}_{int(level_index)}_{leg_tag}"
+        
+        if increment_version:
+            self._order_version[order_key] = self._order_version.get(order_key, 0) + 1
+        
+        version = self._order_version.get(order_key, 1)
+        return f"{self._client_oid_prefix}{order_key}_v{version}"
 
     def _apply_active_buy_levels_filter(self, current_price: float, keep_levels: int, already_on_exchange: set | None = None) -> None:
         """
@@ -1512,17 +1528,29 @@ class BitgetLiveRunner:
         equity_for_limits = float(ps.get("equity", self.config.initial_cash) or self.config.initial_cash)
 
         open_orders = self.execution_engine.get_open_orders(self.symbol)
-        open_by_client: Dict[str, dict] = {}
+        # Map by order_key (direction:level:leg) instead of full client_oid
+        # This allows matching orders regardless of version suffix
+        open_by_order_key: Dict[str, dict] = {}
         for oo in open_orders:
             coid = str(oo.get("client_order_id") or "")
             if coid.startswith(self._client_oid_prefix):
-                open_by_client[coid] = oo
+                # Parse: tg_BTCUSDT_TS_buy_11_long_v1 -> order_key = buy:11:long
+                suffix = coid[len(self._client_oid_prefix):]
+                parts = suffix.split("_")
+                if len(parts) >= 3:
+                    direction = parts[0]
+                    level_str = parts[1]
+                    # leg is parts[2], version is parts[3] (if exists)
+                    leg_tag = parts[2]
+                    leg = None if leg_tag == "long" else leg_tag
+                    order_key = self._order_key(direction, int(level_str), leg)
+                    open_by_order_key[order_key] = oo
 
         # Log sync state for debugging (every 5 minutes or when mismatch)
         desired_buy_levels = sorted([int(k.split(":")[1]) for k in desired.keys() if k.startswith("buy:")])
         open_buy_levels = []
-        for coid in open_by_client.keys():
-            parts = coid[len(self._client_oid_prefix):].split("_")
+        for k in open_by_order_key.keys():
+            parts = k.split(":")
             if len(parts) >= 2 and parts[0] == "buy":
                 open_buy_levels.append(int(parts[1]))
         open_buy_levels = sorted(open_buy_levels)
@@ -1535,18 +1563,14 @@ class BitgetLiveRunner:
             )
 
         # Cancel extra bot orders not in desired set
-        for coid, oo in list(open_by_client.items()):
-            suffix = coid[len(self._client_oid_prefix):]
-            parts = suffix.split("_")
-            if len(parts) < 3:
-                continue
-            direction = parts[0]
-            level_index = int(parts[1])
-            leg_tag = "_".join(parts[2:])
-            leg = None if leg_tag == "long" else leg_tag
-            k = self._order_key(direction, level_index, leg)
-            if k not in desired:
+        for order_key, oo in list(open_by_order_key.items()):
+            if order_key not in desired:
                 oid = str(oo.get("order_id") or "")
+                coid = str(oo.get("client_order_id") or "")
+                # Parse order_key to get direction and level for logging
+                parts = order_key.split(":")
+                direction = parts[0] if len(parts) > 0 else "?"
+                level_index = int(parts[1]) if len(parts) > 1 else 0
                 if oid:
                     if self._safety_can_cancel(now=now_ts):
                         # Log cancellation with reason
@@ -1570,10 +1594,10 @@ class BitgetLiveRunner:
             price = float(o.get("price"))
             leg = o.get("leg")
             qty = float(o.get("quantity"))
-            client_oid = self._make_client_oid(direction, level_index, leg)
+            order_key = self._order_key(direction, level_index, leg)
 
-            if client_oid in open_by_client:
-                oo = open_by_client[client_oid]
+            if order_key in open_by_order_key:
+                oo = open_by_order_key[order_key]
                 open_qty = float(oo.get("quantity", 0.0) or 0.0)
                 # Use 20% tolerance because exchange may truncate/round our quantity
                 # (e.g., we send 0.000795, exchange accepts 0.0007 due to precision)
@@ -1582,8 +1606,9 @@ class BitgetLiveRunner:
                     continue
                 # Only replace if quantity difference is significant (>20%)
                 # Log when replacing to help debug
+                existing_coid = str(oo.get("client_order_id") or "")
                 self.logger.log_info(
-                    f"[ORDER_REPLACE] {client_oid} qty mismatch: open={open_qty:.6f} vs target={qty:.6f} "
+                    f"[ORDER_REPLACE] {order_key} qty mismatch: open={open_qty:.6f} vs target={qty:.6f} "
                     f"(diff={(abs(open_qty - qty) / max(open_qty, qty) * 100):.1f}%)"
                 )
                 oid = str(oo.get("order_id") or "")
@@ -1605,6 +1630,9 @@ class BitgetLiveRunner:
                     f"notional_added={self._safety_notional_added:.2f})."
                 )
                 break
+
+            # Generate unique client_oid with version increment for new placement
+            client_oid = self._make_client_oid(direction, level_index, leg, increment_version=True)
 
             # Derivatives position semantics:
             # - For long grid SELL (leg=None): reduceOnly=True (close/reduce long)
@@ -1790,7 +1818,10 @@ class BitgetLiveRunner:
                                         parts = suffix.split("_")
                                         if len(parts) >= 3:
                                             direction, level_str, leg = parts[0], parts[1], parts[2]
-                                            already_on_exchange.add((direction, int(level_str), leg))
+                                            # Store with None as leg to match how orders store it internally
+                                            # (grid_manager stores leg as None for regular long orders)
+                                            leg_normalized = None if leg == "long" else leg
+                                            already_on_exchange.add((direction, int(level_str), leg_normalized))
                             except Exception:
                                 pass  # If we can't get orders, proceed without sticky behavior
                         
