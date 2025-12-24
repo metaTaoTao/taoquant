@@ -1678,25 +1678,42 @@ class BitgetLiveRunner:
             # Generate unique client_oid with version increment for new placement
             client_oid = self._make_client_oid(direction, level_index, leg, increment_version=True)
 
-            # Derivatives position semantics:
-            # - For long grid SELL (leg=None): reduceOnly=True (close/reduce long)
-            # - For short_cover BUY: reduceOnly=True (close/reduce short)
-            # - For short_open SELL: reduceOnly=False (open/increase short)
-            # - For core BUY: reduceOnly=False (open/increase long)
+            # Derivatives position semantics for Bitget swap:
+            # 
+            # Single-position mode (one-way): use tradeSide = "open" or "close"
+            # Hedge mode (two-way): use holdSide = "long" or "short" 
+            #
+            # For limit orders that reduce position, DON'T use reduceOnly=True
+            # because Bitget validates position immediately and rejects with "No position to close"
+            # if the position update hasn't propagated yet.
+            #
+            # Instead, we use tradeSide for single-position mode:
+            # - BUY to open long: side=buy, tradeSide=open
+            # - SELL to close long: side=sell, tradeSide=close
+            # - SELL to open short: side=sell, tradeSide=open  
+            # - BUY to close short: side=buy, tradeSide=close
             params: Dict[str, Any] = {}
             if self.market_type in ("swap", "future", "futures"):
+                # Determine tradeSide based on order intent
                 if leg == "short_cover" and direction == "buy":
-                    params["reduceOnly"] = True
+                    # Close short position
+                    params["tradeSide"] = "close"
+                    params["holdSide"] = "short"  # For hedge mode compatibility
                 elif leg == "short_open" and direction == "sell":
-                    params["reduceOnly"] = False
+                    # Open short position
+                    params["tradeSide"] = "open"
+                    params["holdSide"] = "short"  # For hedge mode compatibility
                 elif leg is None and direction == "sell":
-                    params["reduceOnly"] = True
+                    # Close long position (grid SELL)
+                    params["tradeSide"] = "close"
+                    params["holdSide"] = "long"  # For hedge mode compatibility
+                elif leg is None and direction == "buy":
+                    # Open long position (grid BUY)
+                    params["tradeSide"] = "open"
+                    params["holdSide"] = "long"  # For hedge mode compatibility
                 else:
-                    params["reduceOnly"] = False
-                # Bitget swap: in unilateral(one-way) position mode, the exchange may require
-                # explicit tradeSide ("open"/"close") even if reduceOnly is provided.
-                # This keeps compatibility with both modes and avoids 40774 errors.
-                params.setdefault("tradeSide", "close" if bool(params.get("reduceOnly")) else "open")
+                    # Default: open position
+                    params["tradeSide"] = "open"
 
             # Determine trigger for this order placement
             place_trigger = "bootstrap" if skip_safety_limits else "strategy"
