@@ -383,3 +383,265 @@ class PostgresStore:
             {"bot_id": bot_id},
         )
 
+    # ============================================================
+    # V2 Schema Methods: Session & Order Event Tracking
+    # ============================================================
+
+    def create_session(
+        self,
+        *,
+        session_id: str,
+        bot_id: str,
+        symbol: str,
+        mode: str,
+        version: Optional[str] = None,
+        config_snapshot: Optional[Dict[str, Any]] = None,
+        notes: Optional[str] = None,
+    ) -> None:
+        """Create a new session record when bot starts."""
+        self._exec(
+            """
+            INSERT INTO sessions (
+                session_id, bot_id, symbol, mode, version, config_snapshot, notes
+            ) VALUES (
+                %(session_id)s, %(bot_id)s, %(symbol)s, %(mode)s, %(version)s,
+                %(config_snapshot)s::jsonb, %(notes)s
+            )
+            ON CONFLICT (session_id) DO NOTHING
+            """,
+            {
+                "session_id": session_id,
+                "bot_id": bot_id,
+                "symbol": symbol,
+                "mode": mode,
+                "version": version,
+                "config_snapshot": json.dumps(config_snapshot or {}, ensure_ascii=False),
+                "notes": notes,
+            },
+        )
+
+    def update_session_startup_stats(
+        self,
+        *,
+        session_id: str,
+        orders_cancelled: int,
+        orders_placed: int,
+        position_qty: Optional[float] = None,
+    ) -> None:
+        """Update session with bootstrap statistics."""
+        self._exec(
+            """
+            UPDATE sessions SET
+                startup_orders_cancelled = %(orders_cancelled)s,
+                startup_orders_placed = %(orders_placed)s,
+                startup_position_qty = %(position_qty)s
+            WHERE session_id = %(session_id)s
+            """,
+            {
+                "session_id": session_id,
+                "orders_cancelled": orders_cancelled,
+                "orders_placed": orders_placed,
+                "position_qty": position_qty,
+            },
+        )
+
+    def end_session(
+        self,
+        *,
+        session_id: str,
+        end_reason: str,
+    ) -> None:
+        """Mark session as ended."""
+        self._exec(
+            """
+            UPDATE sessions SET
+                ended_at = NOW(),
+                end_reason = %(end_reason)s
+            WHERE session_id = %(session_id)s
+            """,
+            {
+                "session_id": session_id,
+                "end_reason": end_reason,
+            },
+        )
+
+    def upsert_order(
+        self,
+        *,
+        session_id: str,
+        bot_id: str,
+        client_order_id: str,
+        symbol: str,
+        side: str,
+        order_type: str,
+        price: Optional[float],
+        qty: float,
+        status: str,
+        grid_level: Optional[int] = None,
+        leg: Optional[str] = None,
+        reason: Optional[str] = None,
+        exchange_order_id: Optional[str] = None,
+    ) -> Optional[int]:
+        """Insert or update an order record. Returns the order id."""
+        row = self._fetchone(
+            """
+            INSERT INTO orders (
+                session_id, bot_id, client_order_id, symbol, side, order_type,
+                price, qty, status, grid_level, leg, reason, exchange_order_id
+            ) VALUES (
+                %(session_id)s, %(bot_id)s, %(client_order_id)s, %(symbol)s,
+                %(side)s, %(order_type)s, %(price)s, %(qty)s, %(status)s,
+                %(grid_level)s, %(leg)s, %(reason)s, %(exchange_order_id)s
+            )
+            ON CONFLICT (bot_id, client_order_id) DO UPDATE SET
+                exchange_order_id = COALESCE(EXCLUDED.exchange_order_id, orders.exchange_order_id),
+                status = EXCLUDED.status,
+                updated_at = NOW()
+            RETURNING id
+            """,
+            {
+                "session_id": session_id,
+                "bot_id": bot_id,
+                "client_order_id": client_order_id,
+                "symbol": symbol,
+                "side": side,
+                "order_type": order_type,
+                "price": price,
+                "qty": qty,
+                "status": status,
+                "grid_level": grid_level,
+                "leg": leg,
+                "reason": reason,
+                "exchange_order_id": exchange_order_id,
+            },
+        )
+        return row["id"] if row else None
+
+    def update_order_status(
+        self,
+        *,
+        bot_id: str,
+        client_order_id: str,
+        status: str,
+        exchange_order_id: Optional[str] = None,
+        filled_qty: Optional[float] = None,
+        avg_fill_price: Optional[float] = None,
+        total_fee: Optional[float] = None,
+    ) -> None:
+        """Update order status and fill info."""
+        updates = ["status = %(status)s", "updated_at = NOW()"]
+        params: Dict[str, Any] = {
+            "bot_id": bot_id,
+            "client_order_id": client_order_id,
+            "status": status,
+        }
+        if exchange_order_id is not None:
+            updates.append("exchange_order_id = %(exchange_order_id)s")
+            params["exchange_order_id"] = exchange_order_id
+        if filled_qty is not None:
+            updates.append("filled_qty = %(filled_qty)s")
+            params["filled_qty"] = filled_qty
+        if avg_fill_price is not None:
+            updates.append("avg_fill_price = %(avg_fill_price)s")
+            params["avg_fill_price"] = avg_fill_price
+        if total_fee is not None:
+            updates.append("total_fee = %(total_fee)s")
+            params["total_fee"] = total_fee
+        if status in ("filled", "cancelled", "rejected"):
+            updates.append("closed_at = NOW()")
+
+        self._exec(
+            f"""
+            UPDATE orders SET {', '.join(updates)}
+            WHERE bot_id = %(bot_id)s AND client_order_id = %(client_order_id)s
+            """,
+            params,
+        )
+
+    def insert_order_event(
+        self,
+        *,
+        session_id: str,
+        client_order_id: str,
+        event_type: str,
+        trigger: str,
+        new_status: str,
+        old_status: Optional[str] = None,
+        order_id: Optional[int] = None,
+        exchange_order_id: Optional[str] = None,
+        fill_qty: Optional[float] = None,
+        fill_price: Optional[float] = None,
+        fill_fee: Optional[float] = None,
+        trade_id: Optional[str] = None,
+        exchange_ts: Optional[datetime] = None,
+        details: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Insert an order event for audit trail."""
+        self._exec_ignore_duplicate(
+            """
+            INSERT INTO order_events (
+                session_id, order_id, client_order_id, exchange_order_id,
+                event_type, trigger, old_status, new_status,
+                fill_qty, fill_price, fill_fee, trade_id, exchange_ts, details
+            ) VALUES (
+                %(session_id)s, %(order_id)s, %(client_order_id)s, %(exchange_order_id)s,
+                %(event_type)s, %(trigger)s, %(old_status)s, %(new_status)s,
+                %(fill_qty)s, %(fill_price)s, %(fill_fee)s, %(trade_id)s, %(exchange_ts)s,
+                %(details)s::jsonb
+            )
+            """,
+            {
+                "session_id": session_id,
+                "order_id": order_id,
+                "client_order_id": client_order_id,
+                "exchange_order_id": exchange_order_id,
+                "event_type": event_type,
+                "trigger": trigger,
+                "old_status": old_status,
+                "new_status": new_status,
+                "fill_qty": fill_qty,
+                "fill_price": fill_price,
+                "fill_fee": fill_fee,
+                "trade_id": trade_id,
+                "exchange_ts": exchange_ts,
+                "details": json.dumps(details or {}, ensure_ascii=False),
+            },
+        )
+
+    def insert_error_log(
+        self,
+        *,
+        bot_id: str,
+        level: str,
+        message: str,
+        session_id: Optional[str] = None,
+        component: Optional[str] = None,
+        error_code: Optional[str] = None,
+        symbol: Optional[str] = None,
+        order_id: Optional[str] = None,
+        details: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Insert an error log entry."""
+        self._exec_ignore_duplicate(
+            """
+            INSERT INTO error_logs (
+                session_id, bot_id, level, component, error_code, message,
+                symbol, order_id, details
+            ) VALUES (
+                %(session_id)s, %(bot_id)s, %(level)s, %(component)s, %(error_code)s,
+                %(message)s, %(symbol)s, %(order_id)s, %(details)s::jsonb
+            )
+            """,
+            {
+                "session_id": session_id,
+                "bot_id": bot_id,
+                "level": level,
+                "component": component,
+                "error_code": error_code,
+                "message": message,
+                "symbol": symbol,
+                "order_id": order_id,
+                "details": json.dumps(details or {}, ensure_ascii=False),
+            },
+        )
+

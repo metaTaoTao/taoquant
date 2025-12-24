@@ -209,10 +209,19 @@ class BitgetLiveRunner:
         self._consecutive_loop_errors: int = 0
         self._last_loop_error_ts: datetime | None = None
 
+        # Session management (v2 schema)
+        self._session_id: str = f"sess_{self._startup_ts}"
+        self._bootstrap_orders_cancelled: int = 0
+        self._bootstrap_orders_placed: int = 0
+        self._bootstrap_position_qty: float | None = None
+
         # Initialize strategy
         self._initialize_strategy()
         # Bootstrap exchange grid: ensure resting limit orders exist (backtest-consistent)
         self._bootstrap_exchange_grid()
+
+        # Create session record in DB after bootstrap
+        self._create_db_session()
 
     def _grid_sig(self) -> str:
         gm = self.algorithm.grid_manager
@@ -506,6 +515,8 @@ class BitgetLiveRunner:
                 self.logger.log_info(
                     f"Cancelled {total_cancelled} previous TaoGrid orders (pattern={bot_prefix_pattern})"
                 )
+                # Track for session stats
+                self._bootstrap_orders_cancelled = total_cancelled
             if remaining:
                 self.logger.log_warning(
                     f"[BOOTSTRAP] Residual bot open orders remain after retries: {len(remaining)} "
@@ -564,6 +575,8 @@ class BitgetLiveRunner:
                     f"[BOOTSTRAP] Detected existing long={exch_long:.8f}. "
                     f"Seeded ledger at price={last_px:.2f} (unrealized_pnl starts at 0)."
                 )
+                # Track for session stats
+                self._bootstrap_position_qty = float(exch_long)
 
             if self.market_type != "spot" and exch_short > float(getattr(self.config, "short_flat_holdings_btc", 0.0005)):
                 # Seed short ledger similarly at mark-to-market.
@@ -1195,6 +1208,25 @@ class BitgetLiveRunner:
                                     f"status={status}"
                                 )
 
+                                # Log fill event to DB (strategy triggered fills)
+                                client_oid = str(order_info.get("client_order_id") or "")
+                                self._log_order_event(
+                                    client_order_id=client_oid,
+                                    event_type="FILLED" if status in ["filled", "closed"] else "PARTIAL",
+                                    trigger="strategy",
+                                    new_status="filled" if status in ["filled", "closed"] else "partial",
+                                    old_status="open",
+                                    exchange_order_id=order_id,
+                                    fill_qty=float(delta_qty),
+                                    fill_price=float(px),
+                                    fill_fee=float(fee_est) if fee_est else None,
+                                    details={
+                                        "level": int(filled_order.get("level", -1)),
+                                        "leg": filled_order.get("leg") or "long",
+                                        "total_filled": float(filled_quantity),
+                                    },
+                                )
+
                                 self.logger.log_order(
                                     order_id=order_id,
                                     status="filled",
@@ -1563,6 +1595,8 @@ class BitgetLiveRunner:
             )
 
         # Cancel extra bot orders not in desired set
+        # Determine trigger: bootstrap if skip_safety_limits, else strategy (normal sync)
+        cancel_trigger = "bootstrap" if skip_safety_limits else "strategy"
         for order_key, oo in list(open_by_order_key.items()):
             if order_key not in desired:
                 oid = str(oo.get("order_id") or "")
@@ -1580,6 +1614,16 @@ class BitgetLiveRunner:
                         )
                         self.execution_engine.cancel_order(self.symbol, oid)
                         self._safety_mark_cancel()
+                        # Log event to DB
+                        self._log_order_event(
+                            client_order_id=coid,
+                            event_type="CANCELLED",
+                            trigger=cancel_trigger,
+                            new_status="cancelled",
+                            old_status="open",
+                            exchange_order_id=oid,
+                            details={"reason": "not_in_desired_set", "order_key": order_key},
+                        )
                         # Throttle API calls (Bitget limit: 10 req/s)
                         time.sleep(0.12)
                     else:
@@ -1654,6 +1698,9 @@ class BitgetLiveRunner:
                 # This keeps compatibility with both modes and avoids 40774 errors.
                 params.setdefault("tradeSide", "close" if bool(params.get("reduceOnly")) else "open")
 
+            # Determine trigger for this order placement
+            place_trigger = "bootstrap" if skip_safety_limits else "strategy"
+
             r = self.execution_engine.place_order(
                 symbol=self.symbol,
                 side=direction,
@@ -1682,10 +1729,51 @@ class BitgetLiveRunner:
                     f"qty={qty:.6f} notional=${notional:.2f} "
                     f"order_id={oid} client_oid={client_oid}"
                 )
+                # Track bootstrap orders placed
+                if skip_safety_limits:
+                    self._bootstrap_orders_placed += 1
+                # Log event to DB
+                self._log_order_event(
+                    client_order_id=client_oid,
+                    event_type="SUBMITTED",
+                    trigger=place_trigger,
+                    new_status="open",
+                    exchange_order_id=oid,
+                    details={
+                        "price": price,
+                        "qty": qty,
+                        "notional": notional,
+                        "level": level_index,
+                        "leg": leg,
+                        "reason": o.get("reason"),
+                    },
+                )
             else:
                 self.logger.log_warning(
                     f"[ORDER_FAILED] {direction.upper()} L{level_index+1} @ ${price:.2f} "
                     f"qty={qty:.6f} - place_order returned None/empty"
+                )
+                # Log failure event to DB
+                self._log_order_event(
+                    client_order_id=client_oid,
+                    event_type="REJECTED",
+                    trigger=place_trigger,
+                    new_status="rejected",
+                    details={
+                        "price": price,
+                        "qty": qty,
+                        "level": level_index,
+                        "leg": leg,
+                        "error": "place_order returned None/empty",
+                    },
+                )
+                # Log error
+                self._log_db_error(
+                    level="WARNING",
+                    message=f"Order placement failed: {direction.upper()} L{level_index+1} @ ${price:.2f}",
+                    component="order_sync",
+                    order_id=client_oid,
+                    details={"price": price, "qty": qty, "level": level_index},
                 )
             
             # Throttle API calls to stay under Bitget's 10 requests/second limit
@@ -2124,20 +2212,31 @@ class BitgetLiveRunner:
 
                 except KeyboardInterrupt:
                     self.logger.log_info("Received interrupt signal, stopping...")
+                    self._end_db_session("manual_stop")
                     break
                 except Exception as e:
                     self.logger.log_error(f"Error in main loop: {e}", exc_info=True)
                     self._consecutive_loop_errors += 1
                     self._last_loop_error_ts = datetime.now(timezone.utc)
+                    # Log error to DB
+                    self._log_db_error(
+                        level="ERROR",
+                        message=str(e),
+                        component="main_loop",
+                        details={"consecutive_errors": self._consecutive_loop_errors},
+                    )
                     time.sleep(10)  # Wait before retrying
 
         except Exception as e:
             self.logger.log_error(f"Fatal error: {e}", exc_info=True)
+            self._end_db_session("crash")
             raise
         finally:
             self.logger.log_info("=" * 80)
             self.logger.log_info("Live Trading Runner Stopped")
             self.logger.log_info("=" * 80)
+            # Ensure session is ended (in case not already done)
+            self._end_db_session("normal")
 
     # ====================================================================
     # Live Status Output Methods
@@ -2501,6 +2600,123 @@ class BitgetLiveRunner:
 
     def _bot_id(self) -> str:
         return f"{str(self.symbol)}_{str(self.market_type)}"
+
+    # ============================================================
+    # V2 Schema: Session & Event Management
+    # ============================================================
+
+    def _create_db_session(self) -> None:
+        """Create session record in DB after bootstrap."""
+        if self._db_store is None:
+            return
+        try:
+            config_dict = {}
+            try:
+                config_dict = {
+                    "support": float(getattr(self.config, "support", 0)),
+                    "resistance": float(getattr(self.config, "resistance", 0)),
+                    "initial_cash": float(getattr(self.config, "initial_cash", 0)),
+                    "leverage": float(getattr(self.config, "leverage", 1)),
+                    "active_buy_levels": self.active_buy_levels,
+                    "cooldown_active_buy_levels": self.cooldown_active_buy_levels,
+                }
+            except Exception:
+                pass
+
+            self._db_store.create_session(
+                session_id=self._session_id,
+                bot_id=self._bot_id(),
+                symbol=self.symbol,
+                mode="dryrun" if self.dry_run else "live",
+                version=None,  # TODO: get git commit
+                config_snapshot=config_dict,
+                notes=f"market_type={self.market_type}",
+            )
+            # Update with bootstrap stats
+            self._db_store.update_session_startup_stats(
+                session_id=self._session_id,
+                orders_cancelled=self._bootstrap_orders_cancelled,
+                orders_placed=self._bootstrap_orders_placed,
+                position_qty=self._bootstrap_position_qty,
+            )
+        except Exception:
+            pass
+
+    def _end_db_session(self, reason: str) -> None:
+        """Mark session as ended in DB."""
+        if self._db_store is None:
+            return
+        try:
+            self._db_store.end_session(
+                session_id=self._session_id,
+                end_reason=reason,
+            )
+        except Exception:
+            pass
+
+    def _log_order_event(
+        self,
+        *,
+        client_order_id: str,
+        event_type: str,
+        trigger: str,
+        new_status: str,
+        old_status: str | None = None,
+        exchange_order_id: str | None = None,
+        fill_qty: float | None = None,
+        fill_price: float | None = None,
+        fill_fee: float | None = None,
+        trade_id: str | None = None,
+        details: dict | None = None,
+    ) -> None:
+        """Log an order event to the database."""
+        if self._db_store is None:
+            return
+        try:
+            self._db_store.insert_order_event(
+                session_id=self._session_id,
+                client_order_id=client_order_id,
+                event_type=event_type,
+                trigger=trigger,
+                new_status=new_status,
+                old_status=old_status,
+                exchange_order_id=exchange_order_id,
+                fill_qty=fill_qty,
+                fill_price=fill_price,
+                fill_fee=fill_fee,
+                trade_id=trade_id,
+                details=details,
+            )
+        except Exception:
+            pass
+
+    def _log_db_error(
+        self,
+        *,
+        level: str,
+        message: str,
+        component: str | None = None,
+        error_code: str | None = None,
+        order_id: str | None = None,
+        details: dict | None = None,
+    ) -> None:
+        """Log an error to the database."""
+        if self._db_store is None:
+            return
+        try:
+            self._db_store.insert_error_log(
+                bot_id=self._bot_id(),
+                level=level,
+                message=message,
+                session_id=self._session_id,
+                component=component,
+                error_code=error_code,
+                symbol=self.symbol,
+                order_id=order_id,
+                details=details,
+            )
+        except Exception:
+            pass
 
     def _persist_status_to_db(self, *, status: dict, bar_timestamp: datetime) -> None:
         """
