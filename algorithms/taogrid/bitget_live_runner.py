@@ -1680,40 +1680,27 @@ class BitgetLiveRunner:
 
             # Derivatives position semantics for Bitget swap:
             # 
-            # Single-position mode (one-way): use tradeSide = "open" or "close"
-            # Hedge mode (two-way): use holdSide = "long" or "short" 
+            # IMPORTANT: Bitget swap in one-way mode does NOT accept tradeSide/holdSide
+            # for limit orders that reduce position. The "No position to close" error
+            # occurs because Bitget validates reduceOnly/close orders immediately.
             #
-            # For limit orders that reduce position, DON'T use reduceOnly=True
-            # because Bitget validates position immediately and rejects with "No position to close"
-            # if the position update hasn't propagated yet.
-            #
-            # Instead, we use tradeSide for single-position mode:
-            # - BUY to open long: side=buy, tradeSide=open
-            # - SELL to close long: side=sell, tradeSide=close
-            # - SELL to open short: side=sell, tradeSide=open  
-            # - BUY to close short: side=buy, tradeSide=close
+            # Solution: For SELL limit orders (closing long), don't specify tradeSide/holdSide.
+            # Let Bitget automatically treat the order as position-reducing when it fills.
+            # 
+            # Only use tradeSide for BUY orders (opening) and short overlay orders.
             params: Dict[str, Any] = {}
             if self.market_type in ("swap", "future", "futures"):
-                # Determine tradeSide based on order intent
                 if leg == "short_cover" and direction == "buy":
-                    # Close short position
+                    # Close short position - use tradeSide=close
                     params["tradeSide"] = "close"
-                    params["holdSide"] = "short"  # For hedge mode compatibility
                 elif leg == "short_open" and direction == "sell":
-                    # Open short position
+                    # Open short position - use tradeSide=open
                     params["tradeSide"] = "open"
-                    params["holdSide"] = "short"  # For hedge mode compatibility
-                elif leg is None and direction == "sell":
-                    # Close long position (grid SELL)
-                    params["tradeSide"] = "close"
-                    params["holdSide"] = "long"  # For hedge mode compatibility
                 elif leg is None and direction == "buy":
-                    # Open long position (grid BUY)
+                    # Open long position (grid BUY) - use tradeSide=open
                     params["tradeSide"] = "open"
-                    params["holdSide"] = "long"  # For hedge mode compatibility
-                else:
-                    # Default: open position
-                    params["tradeSide"] = "open"
+                # For leg is None and direction == "sell" (grid SELL to close long):
+                # DON'T specify tradeSide - let Bitget handle it automatically
 
             # Determine trigger for this order placement
             place_trigger = "bootstrap" if skip_safety_limits else "strategy"
