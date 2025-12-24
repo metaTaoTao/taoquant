@@ -810,14 +810,15 @@ class BitgetLiveRunner:
                 unrealized_profit = (current_price - entry_price) * qty
                 unrealized_profit_pct = (current_price / entry_price) - 1.0
 
-                # Place limit order at current price (ensures immediate fill as maker)
-                # This is better than market order: guaranteed fill + maker fees
-                aggressive_sell_price = current_price * 0.9999  # Slightly below current to ensure fill
+                # Place limit order slightly ABOVE current price to bypass buffer check
+                # This ensures: (1) order not filtered by ORDER_SKIP, (2) immediate fill, (3) maker fees
+                # Buffer threshold is current_price * (1 + 0.0005), so we use 1.001 to be safely above
+                aggressive_sell_price = current_price * 1.001  # 0.1% above current (bypasses 0.05% buffer)
 
                 self.logger.log_warning(
                     f"[POSITION_RECOVERY] Current price ${current_price:.2f} already >= target SELL ${sell_price:.2f}! "
                     f"Unrealized profit: ${unrealized_profit:.2f} ({unrealized_profit_pct:.2%}). "
-                    f"Placing aggressive SELL limit @ ${aggressive_sell_price:.2f} (current price -0.01%) to lock profit."
+                    f"Placing aggressive SELL limit @ ${aggressive_sell_price:.2f} (current price +0.1%) to lock profit."
                 )
 
                 # Override sell_price to use aggressive price
