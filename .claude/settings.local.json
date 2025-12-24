@@ -19,7 +19,8 @@
       "Bash(tee:*)",
       "Bash(dir:*)",
       "Bash(timeout 5 python:*)",
-      "Bash(curl:*)"
+      "Bash(curl:*)",
+      "Bash(echo \"请执行以下命令查看Bitget API调用详情：\nsudo journalctl -u taoquant-runner.service --since ''21:52:30'' --until ''21:52:40'' | grep -E ''Bitget|create_order|POSITION_RECOVERY''\")"
     ],
     "deny": [],
     "ask": []
