@@ -15,7 +15,7 @@
     "cushion_multiplier": 0.8,
     "atr_period": 14,
     "weight_k": 0.0,
-    "leverage": 50.0,
+    "leverage": 10.0,
     "enable_throttling": true,
     "enable_mm_risk_zone": true,
     "enable_console_log": false
