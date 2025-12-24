@@ -375,18 +375,19 @@ SELECT *
 FROM order_events
 WHERE trigger = 'strategy';
 
--- Today's activity summary
+-- Today's activity summary (join with sessions to get bot_id)
 CREATE OR REPLACE VIEW v_today_summary AS
-SELECT 
-    bot_id,
-    COUNT(*) FILTER (WHERE event_type = 'FILLED' AND trigger = 'strategy') as strategy_fills,
-    COUNT(*) FILTER (WHERE event_type = 'FILLED') as total_fills,
-    COUNT(*) FILTER (WHERE event_type = 'CANCELLED' AND trigger = 'strategy') as strategy_cancels,
-    COUNT(*) FILTER (WHERE trigger IN ('bootstrap', 'shutdown')) as restart_events,
-    COUNT(DISTINCT session_id) as session_count
-FROM order_events
-WHERE ts::date = CURRENT_DATE
-GROUP BY bot_id;
+SELECT
+    s.bot_id,
+    COUNT(*) FILTER (WHERE oe.event_type = 'FILLED' AND oe.trigger = 'strategy') as strategy_fills,
+    COUNT(*) FILTER (WHERE oe.event_type = 'FILLED') as total_fills,
+    COUNT(*) FILTER (WHERE oe.event_type = 'CANCELLED' AND oe.trigger = 'strategy') as strategy_cancels,
+    COUNT(*) FILTER (WHERE oe.trigger IN ('bootstrap', 'shutdown')) as restart_events,
+    COUNT(DISTINCT oe.session_id) as session_count
+FROM order_events oe
+JOIN sessions s ON oe.session_id = s.session_id
+WHERE oe.ts::date = CURRENT_DATE
+GROUP BY s.bot_id;
 
 COMMIT;
 
