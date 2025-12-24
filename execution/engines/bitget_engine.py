@@ -135,10 +135,13 @@ class BitgetExecutionEngine:
                 if price is None:
                     raise ValueError("price is required for limit orders")
                 px = float(self.exchange.price_to_precision(ccxt_symbol, float(price)))
-                if self.debug:
-                    print(
-                        f"[Bitget CCXT Engine] create_order(symbol={ccxt_symbol}, type=limit, side={ccxt_side}, amount={amount}, price={px}, clientOid={client_order_id})"
-                    )
+                # Always log order placement attempt for debugging (swap orders need specific params)
+                import sys
+                print(
+                    f"[Bitget CCXT Engine] create_order(symbol={ccxt_symbol}, type=limit, side={ccxt_side}, "
+                    f"amount={amount}, price={px}, params={extra})",
+                    file=sys.stderr
+                )
                 order = self.exchange.create_order(ccxt_symbol, "limit", ccxt_side, amount, px, extra or None)
 
             order_id = str(order.get("id", "")) if isinstance(order, dict) else ""
