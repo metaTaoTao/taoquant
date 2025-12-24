@@ -2036,8 +2036,11 @@ class BitgetLiveRunner:
                 elif leg is None and direction == "buy":
                     # Open long position (grid BUY) - use tradeSide=open
                     params["tradeSide"] = "open"
-                # For leg is None and direction == "sell" (grid SELL to close long):
-                # DON'T specify tradeSide - Bitget auto-detects position reduction on fill
+                elif leg is None and direction == "sell":
+                    # Close long position (grid SELL) - use reduceOnly
+                    # In unilateral mode, SELL without tradeSide defaults to "open short" which conflicts
+                    # Solution: use reduceOnly=true to indicate this order can only reduce position
+                    params["reduceOnly"] = True
 
             # Determine trigger for this order placement
             place_trigger = "bootstrap" if skip_safety_limits else "strategy"
