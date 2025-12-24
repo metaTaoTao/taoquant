@@ -1530,8 +1530,9 @@ class BitgetLiveRunner:
             key = f"{side}_placed" if placed else f"{side}_not_placed"
             pending_by_side[key] = pending_by_side.get(key, 0) + 1
         if not self.dry_run:  # Only log in live mode to avoid spam
+            cp_display = cp if cp is not None else 0.0
             self.logger.log_info(
-                f"[SYNC_START] cp=${cp:.2f if cp else 0:.2f} pending_orders: {dict(pending_by_side)}"
+                f"[SYNC_START] cp=${cp_display:.2f} pending_orders: {dict(pending_by_side)}"
             )
 
         desired: Dict[str, dict] = {}
