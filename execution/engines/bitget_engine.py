@@ -60,7 +60,13 @@ class BitgetExecutionEngine:
                 "secret": api_secret,
                 "password": passphrase,  # Bitget passphrase in CCXT
                 "enableRateLimit": True,
-                "options": {"defaultType": self.market_type},
+                "options": {
+                    "defaultType": self.market_type,
+                    # For swap/futures: enable one-way mode (non-hedged)
+                    # Source: https://github.com/ccxt/ccxt/issues/20729
+                    # Freqtrade implementation: set to one-way mode on startup
+                    "defaultMarginMode": "cross",  # Can be "cross" or "isolated"
+                },
             }
         )
         try:
@@ -68,6 +74,22 @@ class BitgetExecutionEngine:
         except Exception:
             # Non-fatal: some environments may fail to load markets intermittently
             pass
+
+        # For swap/futures markets: Set position mode to ONE-WAY (non-hedged)
+        # This is critical for Bitget to accept our orders
+        # Source: https://www.freqtrade.io/en/stable/exchanges/
+        if self.market_type in ("swap", "future", "futures"):
+            try:
+                # set_position_mode(hedged, symbol, params)
+                # hedged=False means one-way mode (single_hold)
+                # symbol=None applies to all symbols in the (sub)account
+                self.exchange.set_position_mode(False, None)
+                if self.debug:
+                    print(f"[Bitget] Position mode set to ONE-WAY (non-hedged) for {self.market_type} market")
+            except Exception as e:
+                # Some exchanges may not support this method or it may already be set
+                if self.debug:
+                    print(f"[Bitget] Could not set position mode (may already be set): {e}")
 
         # Track pending orders
         self.pending_orders: Dict[str, Dict[str, Any]] = {}

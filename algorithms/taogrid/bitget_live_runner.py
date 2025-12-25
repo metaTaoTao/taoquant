@@ -2081,20 +2081,22 @@ class BitgetLiveRunner:
             # - Error 40774: "unilateral position must also be unilateral position type"
             # - Error 22002: "No position to close"
             #
-            # Solution: Completely omit tradeSide parameter in ONE-WAY mode
+            # Solution: Follow Bitget Official API Documentation for ONE-WAY mode
+            # Source: https://www.bitget.com/api-doc/contract/trade/Place-Order
+            #
+            # Bitget Official Documentation states clearly:
+            # - ONE-WAY MODE: side="buy"/"sell", tradeSide: IGNORE (do not pass)
+            # - HEDGE MODE: side="buy"/"sell", tradeSide="open"/"close" (required)
+            #
+            # Our account is in ONE-WAY MODE, therefore:
+            # 1. Only use standard side="buy"/"sell" parameter
+            # 2. DO NOT pass tradeSide parameter
+            # 3. DO NOT pass custom side values like "buy_single"
+            # 4. Let CCXT pass clean params to Bitget API
             params: Dict[str, Any] = {}
 
-            # CRITICAL FIX: For ONE-WAY mode, CCXT requires explicit side parameter
-            # Source: https://github.com/ccxt/ccxt/issues/17817
-            # Standard side="buy"/"sell" doesn't work - must override with Bitget format
-            if self.market_type in ("swap", "future", "futures"):
-                if direction == "buy":
-                    # For BUY orders in one-way mode: use buy_single
-                    params["side"] = "buy_single"
-                elif direction == "sell":
-                    # For SELL orders in one-way mode: use sell_single
-                    # System will auto-detect if this opens short or closes long
-                    params["side"] = "sell_single"
+            # For one-way mode: Empty params (only clientOid will be added later)
+            # No special parameters needed - Bitget API handles everything based on side param
 
             # Determine trigger for this order placement
             place_trigger = "bootstrap" if skip_safety_limits else "strategy"
