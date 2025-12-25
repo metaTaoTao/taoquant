@@ -578,6 +578,110 @@ class BitgetExecutionEngine:
             return False
         return False
 
+    def close_position(self, symbol: str, side: str) -> Optional[Dict[str, Any]]:
+        """
+        Close position using Bitget's Flash Close Position API.
+
+        This uses the dedicated close position endpoint which works reliably
+        for USDT perpetual swaps in unilateral (one-way) mode.
+
+        Parameters
+        ----------
+        symbol : str
+            Trading symbol (e.g., "BTCUSDT")
+        side : str
+            Position side to close: "long" or "short"
+
+        Returns
+        -------
+        dict or None
+            Close position response, or None if failed
+
+        Notes
+        -----
+        - This method uses Bitget's Flash Close Position API (/api/v2/mix/order/close-positions)
+        - The position will be closed at market price
+        - Only works for swap/futures markets, not spot
+        - Rate limit: 1 request/second/UID
+
+        References
+        ----------
+        https://www.bitget.com/api-doc/contract/trade/Flash-Close-Position
+        """
+        if self.market_type not in ("swap", "future", "futures"):
+            if self.debug:
+                print(f"[Bitget] close_position only works for swap/futures, not {self.market_type}")
+            return None
+
+        try:
+            # Convert symbol to Bitget format (e.g., "BTCUSDT" without slashes)
+            base_symbol = symbol.upper().replace("/", "").replace(":USDT", "")
+
+            # Determine product type
+            product_type = "USDT-FUTURES"  # For USDT perpetual swaps
+
+            # Validate side
+            hold_side = str(side).lower()
+            if hold_side not in ("long", "short"):
+                if self.debug:
+                    print(f"[Bitget] Invalid side '{side}', must be 'long' or 'short'")
+                return None
+
+            # Always log Flash Close API calls (critical operation)
+            print(f"[Bitget CCXT Engine] close_position(symbol={base_symbol}, productType={product_type}, holdSide={hold_side})")
+
+            # Call Bitget's Flash Close Position API via CCXT private endpoint
+            # API: POST /api/v2/mix/order/close-positions
+            response = self.exchange.private_mix_post_v2_mix_order_close_positions({
+                'symbol': base_symbol,
+                'productType': product_type,
+                'holdSide': hold_side,
+            })
+
+            # Always log response (critical operation)
+            print(f"[Bitget] close_position response: {response}")
+
+            # Parse response
+            # Response format: {"code":"00000","data":{"successList":[{"orderId":"...","clientOid":"...","symbol":"..."}],"failureList":[]},"msg":"success"}
+            if response and response.get('code') == '00000':
+                data = response.get('data', {})
+                success_list = data.get('successList', [])
+                failure_list = data.get('failureList', [])
+
+                # Check if position was successfully closed
+                if success_list:
+                    order_info = success_list[0]
+                    return {
+                        'success': True,
+                        'order_id': order_info.get('orderId'),
+                        'client_oid': order_info.get('clientOid'),
+                        'symbol': order_info.get('symbol', symbol),
+                        'side': hold_side,
+                        'message': response.get('msg', 'Position closed successfully'),
+                    }
+                elif failure_list:
+                    # Position close failed
+                    error_info = failure_list[0]
+                    error_msg = error_info.get('errorMsg', 'Unknown error')
+                    error_code = error_info.get('errorCode', 'Unknown')
+                    print(f"[Bitget] close_position failed: {error_code} - {error_msg}")
+                    return None
+                else:
+                    # No success or failure - unexpected response
+                    print(f"[Bitget] close_position returned empty successList and failureList")
+                    return None
+            else:
+                # Always log failures (critical operation)
+                print(f"[Bitget] close_position failed: {response}")
+                return None
+
+        except Exception as e:
+            # Always log exceptions (critical operation)
+            print(f"[Bitget] Error closing position: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+
     @staticmethod
     def _base_currency(symbol: str) -> str:
         upper = symbol.upper()

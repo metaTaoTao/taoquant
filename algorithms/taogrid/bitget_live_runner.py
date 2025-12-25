@@ -683,14 +683,27 @@ class BitgetLiveRunner:
             drift_short = exchange_short - ledger_short
 
             # 4. Log drift detection
-            if abs(drift_long) > 1e-8 or abs(drift_short) > 1e-8:
+            has_drift = abs(drift_long) > 1e-8 or abs(drift_short) > 1e-8
+            if has_drift:
                 self.logger.log_warning(
                     f"[POSITION_RECOVERY] Detected position drift: "
                     f"exchange_long={exchange_long:.8f} vs ledger_long={ledger_long:.8f} (drift={drift_long:+.8f}), "
                     f"exchange_short={exchange_short:.8f} vs ledger_short={ledger_short:.8f} (drift={drift_short:+.8f})"
                 )
+            else:
+                self.logger.log_info(
+                    f"[POSITION_RECOVERY] No drift detected: "
+                    f"exchange matches ledger (long={exchange_long:.8f}, short={exchange_short:.8f})"
+                )
 
-                # 5. Reconcile each position
+            # 5. Reconcile all exchange positions (even if no drift)
+            # IMPORTANT: Bot restart clears pending_limit_orders, so we need to recreate
+            # hedge SELL orders for ANY existing positions, not just drifted ones
+            if exchange_long > 1e-8 or exchange_short > 1e-8:
+                self.logger.log_info(
+                    f"[POSITION_RECOVERY] Found {len(exchange_positions)} position(s) on exchange, "
+                    f"will recover hedge orders..."
+                )
                 for pos in exchange_positions:
                     side = str(pos.get('side', '')).lower()
                     qty = float(pos.get('quantity', 0.0))
@@ -715,11 +728,6 @@ class BitgetLiveRunner:
                             entry_price=entry_price,
                             current_price=current_price
                         )
-            else:
-                self.logger.log_info(
-                    f"[POSITION_RECOVERY] No drift detected: "
-                    f"exchange matches ledger (long={exchange_long:.8f}, short={exchange_short:.8f})"
-                )
 
         except Exception as e:
             self.logger.log_error(f"[POSITION_RECOVERY] Error during reconciliation: {e}", exc_info=True)
@@ -800,51 +808,52 @@ class BitgetLiveRunner:
                 sell_price = sell_levels[sell_idx]
                 actual_spacing_pct = (sell_price / entry_price) - 1.0
 
-            # CRITICAL: Check if current price already passed the sell target
-            # If so, place limit order at current price to ensure immediate execution
-            buffer_pct = 0.0005  # 0.05% buffer (same as eligibility check)
-            price_passed_target = current_price >= sell_price * (1.0 - buffer_pct)
+            # CRITICAL: Check if we have unrealized profit
+            # Only use market order to close if there's profit to lock in
+            unrealized_profit = (current_price - entry_price) * qty
+            unrealized_profit_pct = (current_price / entry_price) - 1.0
 
-            if price_passed_target:
-                # Price already passed sell target - close with MARKET order immediately
-                # Limit orders to close positions fail on Bitget with various API errors
-                unrealized_profit = (current_price - entry_price) * qty
-                unrealized_profit_pct = (current_price / entry_price) - 1.0
-
+            if unrealized_profit > 0:
+                # We have profit - close position immediately using Flash Close Position API
+                # This is the ONLY reliable way to close positions on Bitget swap unilateral mode
+                # Regular market orders fail with errors 40774 or 22002
                 self.logger.log_warning(
-                    f"[POSITION_RECOVERY] Current price ${current_price:.2f} already >= target SELL ${sell_price:.2f}! "
-                    f"Unrealized profit: ${unrealized_profit:.2f} ({unrealized_profit_pct:.2%}). "
-                    f"Closing position immediately with MARKET order."
+                    f"[POSITION_RECOVERY] Position has unrealized profit ${unrealized_profit:.2f} ({unrealized_profit_pct:.2%}). "
+                    f"Entry: ${entry_price:.2f}, Current: ${current_price:.2f}. "
+                    f"Closing immediately with Flash Close Position API to lock profit."
                 )
 
-                # Close position with market order (most reliable for recovery)
+                # Close position using Bitget's dedicated Flash Close Position API
                 try:
-                    order_result = self.execution_engine.place_order(
+                    close_result = self.execution_engine.close_position(
                         symbol=self.symbol,
-                        side='sell',
-                        quantity=qty,
-                        price=None,  # Market order
-                        order_type='market',
-                        client_order_id=f"{self._client_oid_prefix}recovery_market_{int(time.time())}",
-                        params={'tradeSide': 'close'} if self.market_type in ('swap', 'future', 'futures') else None
+                        side='long'  # We're closing a long position
                     )
 
-                    if order_result and order_result.get("order_id"):
+                    if close_result and close_result.get("success"):
                         self.logger.log_warning(
-                            f"[POSITION_RECOVERY] Market order placed successfully: "
-                            f"qty={qty:.8f} @ market, order_id={order_result.get('order_id')}"
+                            f"[POSITION_RECOVERY] Position closed successfully using Flash Close API! "
+                            f"qty={qty:.8f}, profit=${unrealized_profit:.2f}, order_id={close_result.get('order_id')}"
                         )
-                        # Position will be closed by market order, no need to update ledger
+                        # Position successfully closed, no need to update ledger or place hedge orders
                         return
                     else:
                         self.logger.log_error(
-                            f"[POSITION_RECOVERY] Market order failed, will try normal hedge flow"
+                            f"[POSITION_RECOVERY] Flash Close Position failed, will keep position and wait for price to rise. "
+                            f"Result: {close_result}"
                         )
                 except Exception as e:
                     self.logger.log_error(
-                        f"[POSITION_RECOVERY] Error placing market order: {e}, will try normal hedge flow",
+                        f"[POSITION_RECOVERY] Error calling Flash Close Position API: {e}, will keep position and wait",
                         exc_info=True
                     )
+            else:
+                # No profit yet - keep the position and wait for price to rise
+                self.logger.log_warning(
+                    f"[POSITION_RECOVERY] Position at loss/breakeven: ${unrealized_profit:.2f} ({unrealized_profit_pct:.2%}). "
+                    f"Entry: ${entry_price:.2f}, Current: ${current_price:.2f}. "
+                    f"Will keep position and wait for price to rise above target ${sell_price:.2f}."
+                )
 
             # Update ledger to track this position (if market order didn't execute)
             self.algorithm.grid_manager.add_buy_position(
@@ -1779,6 +1788,9 @@ class BitgetLiveRunner:
                 f"[SYNC_START] cp=${cp_display:.2f} pending_orders: {dict(pending_by_side)}"
             )
 
+        # Get current holdings to determine if SELL orders are hedge orders
+        current_holdings = float(self._get_holdings_from_ledger() or 0.0)
+
         desired: Dict[str, dict] = {}
         for o in pending:
             if not bool(o.get("placed", False)):
@@ -1798,12 +1810,22 @@ class BitgetLiveRunner:
                         f"threshold=${cp * (1.0 - buffer_pct):.2f}) - would execute immediately as taker"
                     )
                     continue  # Skip buy orders at or too close to current price
-                if direction == "sell" and price < cp * (1.0 + buffer_pct):
-                    self.logger.log_warning(
-                        f"[ORDER_SKIP] SELL L{level_index+1} @ ${price:.2f} too close to market (cp=${cp:.2f}, "
-                        f"threshold=${cp * (1.0 + buffer_pct):.2f}) - would execute immediately as taker"
-                    )
-                    continue  # Skip sell orders at or too close to current price
+
+                # CRITICAL: For SELL orders, distinguish between hedge orders (to close positions) and grid orders
+                # - Hedge SELL orders (when we have holdings): ALLOW even if they would execute as taker
+                #   Priority is closing positions and locking profits, not maker fees
+                # - Grid SELL orders (when no holdings): Skip if too close to market (would execute as taker)
+                if direction == "sell":
+                    is_hedge_order = current_holdings > 1e-8  # We have long position, this SELL is to hedge
+
+                    if not is_hedge_order and price < cp * (1.0 + buffer_pct):
+                        # Grid SELL order (no position): skip if too close to market
+                        self.logger.log_warning(
+                            f"[ORDER_SKIP] SELL L{level_index+1} @ ${price:.2f} too close to market (cp=${cp:.2f}, "
+                            f"threshold=${cp * (1.0 + buffer_pct):.2f}) - would execute immediately as taker"
+                        )
+                        continue
+                    # Hedge SELL orders are NOT skipped, even if close to market
 
             desired[self._order_key(direction, level_index, leg)] = o
 
@@ -2030,39 +2052,49 @@ class BitgetLiveRunner:
             # Generate unique client_oid with version increment for new placement
             client_oid = self._make_client_oid(direction, level_index, leg, increment_version=True)
 
-            # Derivatives position semantics for Bitget swap:
+            # Derivatives position semantics for Bitget swap (Updated 2025-12-25):
             #
-            # IMPORTANT: Bitget swap LIMIT order handling differs for position reduction:
+            # CRITICAL: Bitget API v2 Official Documentation - tradeSide Parameter Usage
+            # Source: https://www.bitget.com/api-doc/contract/trade/Place-Order
             #
-            # - For LIMIT orders that REDUCE position (SELL to close long):
-            #   DO NOT use tradeSide='close' - causes error 22002 "No position to close"
-            #   Bitget validates position immediately, but limit order hasn't filled yet.
-            #   Solution: Omit tradeSide parameter. Bitget auto-detects position reduction on fill.
+            # ┌─────────────────┬──────────────────────────────────────────────────┐
+            # │ Position Mode   │ tradeSide Parameter Behavior                     │
+            # ├─────────────────┼──────────────────────────────────────────────────┤
+            # │ ONE-WAY MODE    │ IGNORE tradeSide - DO NOT USE THIS PARAMETER     │
+            # │ (unilateral)    │ System auto-detects open/close based on position │
+            # │                 │ Only use: side='buy' or side='sell'              │
+            # ├─────────────────┼──────────────────────────────────────────────────┤
+            # │ HEDGE MODE      │ MUST use tradeSide='open' or tradeSide='close'   │
+            # │ (双向持仓)       │ Required to distinguish open vs close operations │
+            # └─────────────────┴──────────────────────────────────────────────────┘
             #
-            # - For orders that OPEN position: MUST use tradeSide='open'
-            #   Without it, get error 40774 "unilateral position must also be unilateral position type"
+            # Our Exchange Configuration: ONE-WAY MODE (unilateral/single_hold)
+            # Therefore: DO NOT use tradeSide parameter at all!
             #
-            # Correct usage:
-            # - BUY to open long: tradeSide='open'  (required)
-            # - SELL to close long: NO tradeSide  (auto-detected on fill)
-            # - SELL to open short: tradeSide='open'  (required)
-            # - BUY to close short: tradeSide='close'  (for market orders)
+            # Correct usage for ONE-WAY MODE:
+            # ✅ BUY to open long:   side='buy'  (NO tradeSide)
+            # ✅ SELL to close long: side='sell' (NO tradeSide, auto-detected as reduce)
+            # ✅ SELL to open short: side='sell' (NO tradeSide)
+            # ✅ BUY to close short: side='buy'  (NO tradeSide, auto-detected as reduce)
+            #
+            # Previous errors when using tradeSide in ONE-WAY mode:
+            # - Error 40774: "unilateral position must also be unilateral position type"
+            # - Error 22002: "No position to close"
+            #
+            # Solution: Completely omit tradeSide parameter in ONE-WAY mode
             params: Dict[str, Any] = {}
+
+            # CRITICAL FIX: For ONE-WAY mode, CCXT requires explicit side parameter
+            # Source: https://github.com/ccxt/ccxt/issues/17817
+            # Standard side="buy"/"sell" doesn't work - must override with Bitget format
             if self.market_type in ("swap", "future", "futures"):
-                if leg == "short_cover" and direction == "buy":
-                    # Close short position - use tradeSide=close
-                    params["tradeSide"] = "close"
-                elif leg == "short_open" and direction == "sell":
-                    # Open short position - use tradeSide=open
-                    params["tradeSide"] = "open"
-                elif leg is None and direction == "buy":
-                    # Open long position (grid BUY) - use tradeSide=open
-                    params["tradeSide"] = "open"
-                elif leg is None and direction == "sell":
-                    # Close long position (grid SELL) - use reduceOnly
-                    # In unilateral mode, SELL without tradeSide defaults to "open short" which conflicts
-                    # Solution: use reduceOnly=true to indicate this order can only reduce position
-                    params["reduceOnly"] = True
+                if direction == "buy":
+                    # For BUY orders in one-way mode: use buy_single
+                    params["side"] = "buy_single"
+                elif direction == "sell":
+                    # For SELL orders in one-way mode: use sell_single
+                    # System will auto-detect if this opens short or closes long
+                    params["side"] = "sell_single"
 
             # Determine trigger for this order placement
             place_trigger = "bootstrap" if skip_safety_limits else "strategy"

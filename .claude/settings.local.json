@@ -20,7 +20,21 @@
       "Bash(dir:*)",
       "Bash(timeout 5 python:*)",
       "Bash(curl:*)",
-      "Bash(echo \"请执行以下命令查看Bitget API调用详情：\nsudo journalctl -u taoquant-runner.service --since ''21:52:30'' --until ''21:52:40'' | grep -E ''Bitget|create_order|POSITION_RECOVERY''\")"
+      "Bash(echo \"请执行以下命令查看Bitget API调用详情：\nsudo journalctl -u taoquant-runner.service --since ''21:52:30'' --until ''21:52:40'' | grep -E ''Bitget|create_order|POSITION_RECOVERY''\")",
+      "Bash(where:*)",
+      "Bash(ssh:*)",
+      "Bash(ssh-keygen:*)",
+      "Bash(echo \"请在PowerShell中执行以下命令安装gcloud CLI:\n\n# 1. 下载安装器\n\\(New-Object Net.WebClient\\).DownloadFile\\(''https://dl.google.com/dl/cloudsdk/channels/rapid/GoogleCloudSDKInstaller.exe'', ''$env:TEMP\\\\GoogleCloudSDKInstaller.exe''\\)\n\n# 2. 运行安装器\nStart-Process -Wait -FilePath $env:TEMP\\\\GoogleCloudSDKInstaller.exe\n\n# 3. 安装完成后，重启PowerShell，然后运行初始化\ngcloud init\")",
+      "Bash(powershell -Command \"\nWrite-Host ''正在下载 Google Cloud SDK 安装器...'' -ForegroundColor Green\n$installerPath = \"\"$env:TEMP\\\\GoogleCloudSDKInstaller.exe\"\"\ntry {\n    \\(New-Object Net.WebClient\\).DownloadFile\\(''https://dl.google.com/dl/cloudsdk/channels/rapid/GoogleCloudSDKInstaller.exe'', $installerPath\\)\n    Write-Host ''下载完成！启动安装器...'' -ForegroundColor Green\n    Start-Process -FilePath $installerPath -Wait\n    Write-Host ''安装完成！请重启PowerShell并运行: gcloud init'' -ForegroundColor Yellow\n} catch {\n    Write-Host ''下载失败，请手动访问：https://cloud.google.com/sdk/docs/install'' -ForegroundColor Red\n    Write-Host $_.Exception.Message -ForegroundColor Red\n}\n\")",
+      "Bash(powershell:*)",
+      "Bash(gcloud compute ssh:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push)",
+      "Bash(scp:*)",
+      "WebSearch",
+      "WebFetch(domain:www.bitget.com)",
+      "WebFetch(domain:github.com)"
     ],
     "deny": [],
     "ask": []
