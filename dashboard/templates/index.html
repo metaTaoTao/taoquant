@@ -582,19 +582,23 @@
             <div class="card-header">Risk Control</div>
             <div class="card-row">
                 <span class="card-label">Risk Level</span>
-                <span class="badge badge-warning" id="risk-level">LEVEL 2</span>
+                <span class="badge badge-warning" id="risk-level">🟡 MODERATE</span>
             </div>
             <div class="card-row">
-                <span class="card-label">Grid Status</span>
-                <span class="badge badge-success" id="grid-status">ENABLED</span>
+                <span class="card-label">Effective Leverage</span>
+                <span class="card-value-inline" id="effective-leverage">2.38x <span class="text-muted">/ <span id="max-leverage">50.00x</span></span></span>
             </div>
             <div class="card-row">
-                <span class="card-label">Unrealized Loss</span>
-                <span class="card-value-inline text-green"><span id="unrealized-loss-check">7.2%</span> / <span id="unrealized-loss-threshold">30.0%</span></span>
+                <span class="card-label">Liquidation Price</span>
+                <span class="card-value-inline text-red" id="liquidation-price">$83,148</span>
             </div>
             <div class="card-row">
-                <span class="card-label">Inventory Risk</span>
-                <span class="card-value-inline"><span id="inventory-risk-check">45.6%</span> / <span id="inventory-threshold">80.0%</span></span>
+                <span class="card-label">Distance to Liq</span>
+                <span class="card-value-inline" id="distance-to-liq"><span class="text-green">▲ 5.12%</span></span>
+            </div>
+            <div class="card-row">
+                <span class="card-label">Margin Usage</span>
+                <span class="card-value-inline"><span id="margin-usage">4.76%</span> <span class="text-muted">(<span id="margin-used">$4.76</span>)</span></span>
             </div>
         </div>
     </div>
@@ -1154,17 +1158,88 @@
                 // Update Risk section
                 if (data.risk) {
                     const r = data.risk;
-                    document.getElementById('risk-level').textContent = r.risk_level !== undefined ? r.risk_level : 'N/A';
-                    document.getElementById('grid-status').textContent = r.grid_enabled ? 'ENABLED' : 'DISABLED';
 
-                    if (r.checks) {
-                        if (r.checks.unrealized_loss) {
-                            document.getElementById('unrealized-loss-check').textContent = formatPercent(r.checks.unrealized_loss.value_pct, 2);
-                            document.getElementById('unrealized-loss-threshold').textContent = formatPercent(r.checks.unrealized_loss.threshold, 2);
+                    // Risk Level with emoji
+                    const riskLevelEl = document.getElementById('risk-level');
+                    if (riskLevelEl && r.risk_level !== undefined) {
+                        const riskEmoji = {
+                            'LOW': '🟢',
+                            'MODERATE': '🟡',
+                            'HIGH': '🔴',
+                            'CRITICAL': '⚫'
+                        };
+                        const emoji = riskEmoji[r.risk_level] || '';
+                        riskLevelEl.textContent = `${emoji} ${r.risk_level}`;
+                        riskLevelEl.className = 'badge ' + (
+                            r.risk_level === 'LOW' ? 'badge-success' :
+                            r.risk_level === 'MODERATE' ? 'badge-warning' :
+                            r.risk_level === 'HIGH' ? 'badge-danger' :
+                            'badge-danger'
+                        );
+                    }
+
+                    // Effective Leverage
+                    const effLevEl = document.getElementById('effective-leverage');
+                    const maxLevEl = document.getElementById('max-leverage');
+                    if (effLevEl && r.effective_leverage !== undefined) {
+                        const effLev = Number(r.effective_leverage);
+                        effLevEl.innerHTML = `${effLev.toFixed(2)}x <span class="text-muted">/ <span id="max-leverage">${Number(r.max_leverage || 50).toFixed(2)}x</span></span>`;
+                        // Color coding
+                        if (effLev >= 10) {
+                            effLevEl.style.color = 'var(--danger-red)';
+                        } else if (effLev >= 5) {
+                            effLevEl.style.color = 'var(--warning-orange)';
+                        } else if (effLev >= 2) {
+                            effLevEl.style.color = 'var(--text-cyan)';
+                        } else {
+                            effLevEl.style.color = 'var(--success-green)';
                         }
-                        if (r.checks.inventory_risk) {
-                            document.getElementById('inventory-risk-check').textContent = formatPercent(r.checks.inventory_risk.value_pct, 2);
-                            document.getElementById('inventory-threshold').textContent = formatPercent(r.checks.inventory_risk.threshold, 2);
+                    }
+
+                    // Liquidation Price
+                    const liqPriceEl = document.getElementById('liquidation-price');
+                    if (liqPriceEl && r.liquidation_price !== undefined) {
+                        if (r.liquidation_price === null || r.liquidation_price === 0) {
+                            liqPriceEl.textContent = 'N/A';
+                            liqPriceEl.className = 'card-value-inline text-muted';
+                        } else {
+                            liqPriceEl.textContent = '$' + formatNumber(r.liquidation_price, 0);
+                            liqPriceEl.className = 'card-value-inline text-red';
+                        }
+                    }
+
+                    // Distance to Liquidation
+                    const distLiqEl = document.getElementById('distance-to-liq');
+                    if (distLiqEl && r.distance_to_liquidation !== undefined) {
+                        if (r.distance_to_liquidation === null) {
+                            distLiqEl.innerHTML = '<span class="text-muted">N/A</span>';
+                        } else {
+                            const dist = Number(r.distance_to_liquidation) * 100;
+                            const arrow = dist >= 0 ? '▲' : '▼';
+                            const colorClass = dist <= 2 ? 'text-red-bright' :
+                                              dist <= 5 ? 'text-orange' :
+                                              dist <= 10 ? 'text-cyan' :
+                                              'text-green';
+                            distLiqEl.innerHTML = `<span class="${colorClass}">${arrow} ${Math.abs(dist).toFixed(2)}%</span>`;
+                        }
+                    }
+
+                    // Margin Usage
+                    const marginUsageEl = document.getElementById('margin-usage');
+                    const marginUsedEl = document.getElementById('margin-used');
+                    if (marginUsageEl && r.margin_usage_pct !== undefined) {
+                        marginUsageEl.textContent = formatPercent(r.margin_usage_pct, 2);
+                        if (marginUsedEl && r.margin_used !== undefined) {
+                            marginUsedEl.textContent = '$' + formatNumber(r.margin_used, 2);
+                        }
+                        // Color coding
+                        const usage = Number(r.margin_usage_pct);
+                        if (usage >= 0.8) {
+                            marginUsageEl.style.color = 'var(--danger-red)';
+                        } else if (usage >= 0.5) {
+                            marginUsageEl.style.color = 'var(--warning-orange)';
+                        } else {
+                            marginUsageEl.style.color = 'var(--success-green)';
                         }
                     }
                 }

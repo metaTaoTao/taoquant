@@ -2809,6 +2809,49 @@ class BitgetLiveRunner:
 
         price_depth_status = "OK" if price >= price_depth_threshold else "WARN"
 
+        # Advanced Risk Metrics for Dashboard
+        # Calculate effective leverage, liquidation price, and distance to liquidation
+        position_value = abs(net_position_btc) * price
+        effective_leverage = (position_value / equity) if equity > 0 else 0.0
+
+        # Bitget USDT perpetual swap maintenance margin rate (0.4% for low leverage tiers)
+        maintenance_margin_rate = 0.004
+
+        # Liquidation price calculation (for long positions)
+        liquidation_price = None
+        distance_to_liquidation = None
+        if net_position_btc > 0 and avg_cost > 0 and leverage > 0:
+            # Formula: liq_price = avg_entry_price × (1 - 1/leverage + maintenance_margin_rate)
+            liquidation_price = avg_cost * (1.0 - (1.0 / leverage) + maintenance_margin_rate)
+            # Distance to liquidation as percentage
+            distance_to_liquidation = (price - liquidation_price) / price if price > 0 else 0.0
+        elif net_position_btc < 0 and avg_cost > 0 and leverage > 0:
+            # For short positions: liq_price = avg_entry_price × (1 + 1/leverage - maintenance_margin_rate)
+            liquidation_price = avg_cost * (1.0 + (1.0 / leverage) - maintenance_margin_rate)
+            # Distance to liquidation for shorts (negative when in danger)
+            distance_to_liquidation = (liquidation_price - price) / price if price > 0 else 0.0
+
+        # Margin usage calculation
+        margin_used = position_value / leverage if leverage > 0 else position_value
+        margin_usage_pct = margin_used / equity if equity > 0 else 0.0
+
+        # Overall risk level determination
+        # Priority: liquidation risk > leverage risk > margin usage
+        overall_risk_level = "LOW"
+        if distance_to_liquidation is not None:
+            if effective_leverage >= 10 or distance_to_liquidation <= 0.02:
+                overall_risk_level = "CRITICAL"
+            elif effective_leverage >= 5 or distance_to_liquidation <= 0.05:
+                overall_risk_level = "HIGH"
+            elif effective_leverage >= 2 or distance_to_liquidation <= 0.10:
+                overall_risk_level = "MODERATE"
+        elif effective_leverage >= 10:
+            overall_risk_level = "CRITICAL"
+        elif effective_leverage >= 5:
+            overall_risk_level = "HIGH"
+        elif effective_leverage >= 2:
+            overall_risk_level = "MODERATE"
+
         # Regime mapping (dashboard schema wants BULLISH/NEUTRAL/BEARISH)
         regime_raw = str(getattr(self.config, "regime", "NEUTRAL") or "NEUTRAL")
         if regime_raw.upper().startswith("BULL"):
@@ -2915,9 +2958,17 @@ class BitgetLiveRunner:
                 "data_latency_ms": 0.0,
             },
             "risk": {
-                "risk_level": risk_level,
+                "risk_level": overall_risk_level,  # Overall risk: LOW, MODERATE, HIGH, CRITICAL
                 "grid_enabled": grid_enabled,
                 "shutdown_reason": shutdown_reason,
+                # Liquidation Risk Metrics (for Dashboard)
+                "effective_leverage": effective_leverage,
+                "max_leverage": leverage,
+                "liquidation_price": liquidation_price,
+                "distance_to_liquidation": distance_to_liquidation,
+                "margin_used": margin_used,
+                "margin_usage_pct": margin_usage_pct,
+                # Legacy risk checks (keep for compatibility)
                 "checks": {
                     "price_depth": {
                         "status": price_depth_status,
@@ -2937,6 +2988,8 @@ class BitgetLiveRunner:
                     },
                 },
                 "last_check_time": ts_iso,
+                # Grid-level risk (from GridManager, kept for historical context)
+                "grid_risk_level": risk_level,
             },
             "strategy": {
                 "name": f"TaoGrid {regime_raw}",
