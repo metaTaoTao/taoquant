@@ -806,32 +806,54 @@ class BitgetLiveRunner:
             price_passed_target = current_price >= sell_price * (1.0 - buffer_pct)
 
             if price_passed_target:
-                # Price already passed sell target - use aggressive limit order
+                # Price already passed sell target - close with MARKET order immediately
+                # Limit orders to close positions fail on Bitget with various API errors
                 unrealized_profit = (current_price - entry_price) * qty
                 unrealized_profit_pct = (current_price / entry_price) - 1.0
-
-                # Place limit order slightly ABOVE current price to bypass buffer check
-                # This ensures: (1) order not filtered by ORDER_SKIP, (2) immediate fill, (3) maker fees
-                # Buffer threshold is current_price * (1 + 0.0005), so we use 1.001 to be safely above
-                aggressive_sell_price = current_price * 1.001  # 0.1% above current (bypasses 0.05% buffer)
 
                 self.logger.log_warning(
                     f"[POSITION_RECOVERY] Current price ${current_price:.2f} already >= target SELL ${sell_price:.2f}! "
                     f"Unrealized profit: ${unrealized_profit:.2f} ({unrealized_profit_pct:.2%}). "
-                    f"Placing aggressive SELL limit @ ${aggressive_sell_price:.2f} (current price +0.1%) to lock profit."
+                    f"Closing position immediately with MARKET order."
                 )
 
-                # Override sell_price to use aggressive price
-                sell_price = aggressive_sell_price
+                # Close position with market order (most reliable for recovery)
+                try:
+                    order_result = self.execution_engine.place_order(
+                        symbol=self.symbol,
+                        side='sell',
+                        quantity=qty,
+                        price=None,  # Market order
+                        order_type='market',
+                        client_order_id=f"{self._client_oid_prefix}recovery_market_{int(time.time())}",
+                        params={'tradeSide': 'close'} if self.market_type in ('swap', 'future', 'futures') else None
+                    )
 
-            # Update ledger to track this position
+                    if order_result and order_result.get("order_id"):
+                        self.logger.log_warning(
+                            f"[POSITION_RECOVERY] Market order placed successfully: "
+                            f"qty={qty:.8f} @ market, order_id={order_result.get('order_id')}"
+                        )
+                        # Position will be closed by market order, no need to update ledger
+                        return
+                    else:
+                        self.logger.log_error(
+                            f"[POSITION_RECOVERY] Market order failed, will try normal hedge flow"
+                        )
+                except Exception as e:
+                    self.logger.log_error(
+                        f"[POSITION_RECOVERY] Error placing market order: {e}, will try normal hedge flow",
+                        exc_info=True
+                    )
+
+            # Update ledger to track this position (if market order didn't execute)
             self.algorithm.grid_manager.add_buy_position(
                 buy_level_index=nearest_buy_idx,
                 size=qty,
                 buy_price=entry_price
             )
 
-            # Place hedge SELL order
+            # Place hedge SELL limit order
             self.algorithm.grid_manager.place_pending_order(
                 direction='sell',
                 level_index=sell_idx,
