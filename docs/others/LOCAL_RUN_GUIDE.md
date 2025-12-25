@@ -405,7 +405,7 @@ Set-ExecutionPolicy RemoteSigned -Scope CurrentUser
 
 ## 📚 相关文档
 
-- **Bitget实盘详细说明**: [algorithms/taogrid/BITGET_LIVE_README.md](../algorithms/taogrid/BITGET_LIVE_README.md)
+- **Bitget实盘详细说明**: [algorithms/taogrid/BITGET_LIVE_README.md](../../algorithms/taogrid/BITGET_LIVE_README.md)
 - **策略配置说明**: 查看 `config_bitget_live.json` 中的注释
 
 ## 💡 提示

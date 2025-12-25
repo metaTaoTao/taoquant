@@ -1,6 +1,6 @@
 # GCP快速开始指南
 
-这是GCP部署的快速参考指南。完整文档请查看 [gcp_deployment_guide.md](./gcp_deployment_guide.md)。
+这是GCP部署的快速参考指南。完整文档请查看 [gcp_deployment_guide.md](gcp_deployment_guide.md)。
 
 ## 🎯 5分钟快速部署
 
@@ -139,9 +139,9 @@ bash scripts/gcp/manage.sh restart
 
 ## 📚 相关文档
 
-- **完整部署指南**: [gcp_deployment_guide.md](./gcp_deployment_guide.md)
+- **完整部署指南**: [gcp_deployment_guide.md](gcp_deployment_guide.md)
 - **脚本说明**: [scripts/gcp/README.md](../scripts/gcp/README.md)
-- **Bitget实盘指南**: [algorithms/taogrid/BITGET_LIVE_README.md](../algorithms/taogrid/BITGET_LIVE_README.md)
+- **Bitget实盘指南**: [algorithms/taogrid/BITGET_LIVE_README.md](../../algorithms/taogrid/BITGET_LIVE_README.md)
 
 ## ⚠️ 重要提示
 

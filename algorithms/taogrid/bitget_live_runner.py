@@ -1389,37 +1389,91 @@ class BitgetLiveRunner:
                         self.symbol, order_id
                     )
 
-                    # CRITICAL FIX: If get_order_status returns None/error (e.g., Bitget 40109),
-                    # the order likely filled and was cleared from exchange history.
-                    # Strategy: Assume it filled at limit price and trigger hedge logic.
+                    # CRITICAL FIX (2025-12-25): Verify position change before assuming fill
+                    # Previous bug: Assumed order filled when get_order_status returns None
+                    # Reality: None can mean cancelled/expired/API error
+                    # Solution: Check if exchange position actually changed
                     if order_status is None:
-                        # Try to get current price for realistic fill simulation
+                        # Get current price for position verification
                         try:
                             latest_bar = self.data_source.get_latest_bar(self.symbol, "1m")
                             current_price = float(latest_bar["close"]) if latest_bar else None
                         except Exception:
                             current_price = None
 
-                        # Assume filled at limit price (order_info contains the original order details)
+                        # Extract order details
+                        expected_side = order_info.get("side", "").lower()
+                        expected_qty = float(order_info.get("quantity", 0.0))
                         fill_price = float(order_info.get("price", 0.0))
-                        fill_qty = float(order_info.get("quantity", 0.0))
+                        leg = order_info.get("leg", "")
 
-                        if fill_price > 0 and fill_qty > 0:
+                        # Get current exchange position
+                        try:
+                            portfolio_state = self._get_portfolio_state(current_price=current_price or fill_price)
+                            exchange_long = float(portfolio_state.get("long_holdings", 0.0))
+                            exchange_short = float(portfolio_state.get("short_holdings", 0.0))
+                        except Exception as e:
+                            self.logger.log_error(
+                                f"[FILL_RECOVERY] Failed to get portfolio state for order_id={order_id}: {e}"
+                            )
+                            # Remove order without hedge if we can't verify position
+                            del self.pending_orders[order_id]
+                            continue
+
+                        # Get internal ledger position
+                        ledger_long = 0.0
+                        ledger_short = 0.0
+                        try:
+                            # Sum up positions from grid manager
+                            for level_idx, positions in self.algorithm.grid_manager.buy_positions.items():
+                                for pos in positions:
+                                    ledger_long += float(pos.get("size", 0.0))
+                            for level_idx, positions in self.algorithm.grid_manager.short_positions.items():
+                                for pos in positions:
+                                    ledger_short += float(pos.get("size", 0.0))
+                        except Exception:
+                            pass  # If ledger read fails, use 0
+
+                        # Check if position changed as expected (allow 5% tolerance for rounding)
+                        position_matches = False
+
+                        if expected_side == "buy":
+                            # BUY order should increase long position
+                            # Check: exchange_long >= ledger_long + expected_qty * 0.95
+                            if exchange_long >= (ledger_long + expected_qty * 0.95):
+                                position_matches = True
+                                self.logger.log_info(
+                                    f"[FILL_RECOVERY] ✅ Confirmed BUY fill via position check. "
+                                    f"exchange_long={exchange_long:.6f}, ledger_long={ledger_long:.6f}, "
+                                    f"expected_qty={expected_qty:.6f}"
+                                )
+                        elif expected_side == "sell":
+                            # SELL order behavior depends on leg
+                            if leg == "long":
+                                # Long leg SELL: should decrease long position
+                                if exchange_long <= (ledger_long - expected_qty * 0.95):
+                                    position_matches = True
+                            elif leg == "short_open":
+                                # Short open: should increase short position
+                                if exchange_short >= (ledger_short + expected_qty * 0.95):
+                                    position_matches = True
+
+                        if position_matches and fill_price > 0 and expected_qty > 0:
+                            # ✅ Position change confirms fill
                             self.logger.log_warning(
-                                f"[FILL_RECOVERY] order_id={order_id} not in open orders and "
-                                f"get_order_status returned None. Assuming FILLED and triggering hedge. "
-                                f"side={order_info.get('side')} level={order_info.get('level')} "
-                                f"price={fill_price:.2f} qty={fill_qty:.6f}"
+                                f"[FILL_RECOVERY] order_id={order_id} status=None but position confirms fill. "
+                                f"Triggering hedge. side={expected_side} level={order_info.get('level')} "
+                                f"price={fill_price:.2f} qty={expected_qty:.6f}"
                             )
 
                             # Create filled_order event to trigger hedge logic
                             filled_order = {
-                                "direction": order_info.get("side", "").lower(),
+                                "direction": expected_side,
                                 "price": fill_price,
-                                "quantity": fill_qty,
+                                "quantity": expected_qty,
                                 "level": int(order_info.get("level", -1)),
                                 "timestamp": datetime.now(timezone.utc),
-                                "leg": order_info.get("leg"),
+                                "leg": leg,
                             }
 
                             # Trigger strategy's fill handler (this will place hedge orders)
@@ -1454,9 +1508,43 @@ class BitgetLiveRunner:
 
                             filled_orders.append(filled_order)
 
-                        # Remove from pending to stop repeated queries
-                        del self.pending_orders[order_id]
-                        continue
+                            # Remove from pending to stop repeated queries
+                            del self.pending_orders[order_id]
+                            continue
+                        else:
+                            # ❌ Position unchanged → order NOT filled
+                            self.logger.log_warning(
+                                f"[FILL_RECOVERY] order_id={order_id} status=None and position unchanged. "
+                                f"Order NOT filled. Removing from pending_orders without hedge. "
+                                f"exchange_long={exchange_long:.6f}, ledger_long={ledger_long:.6f}, "
+                                f"exchange_short={exchange_short:.6f}, ledger_short={ledger_short:.6f}, "
+                                f"expected_side={expected_side}, expected_qty={expected_qty:.6f}"
+                            )
+
+                            # Remove order without triggering hedge
+                            del self.pending_orders[order_id]
+
+                            # Log to database for audit trail
+                            try:
+                                self._log_order_event(
+                                    client_order_id=order_info.get("client_order_id", ""),
+                                    event_type="EXPIRED_OR_CANCELLED",
+                                    trigger="fill_recovery",
+                                    new_status="expired",
+                                    old_status="unknown",
+                                    exchange_order_id=order_id,
+                                    details={
+                                        "reason": "status_none_position_unchanged",
+                                        "exchange_long": exchange_long,
+                                        "ledger_long": ledger_long,
+                                        "exchange_short": exchange_short,
+                                        "ledger_short": ledger_short,
+                                    },
+                                )
+                            except Exception:
+                                pass
+
+                            continue
 
                     if order_status:
                         status = order_status.get("status", "").lower()
@@ -2013,6 +2101,61 @@ class BitgetLiveRunner:
             leg = o.get("leg")
             qty = float(o.get("quantity"))
             order_key = self._order_key(direction, level_index, leg)
+
+            # ✅ CRITICAL FIX (2025-12-25): SELL order protection for long-only strategy
+            # Prevent SELL orders from opening SHORT positions in NEUTRAL_RANGE (long-only) mode
+            if direction == "sell" and leg == "long":
+                # Get current exchange actual position
+                try:
+                    portfolio_state = self._get_portfolio_state(current_price=price)
+                    exchange_long = float(portfolio_state.get("long_holdings", 0.0))
+                except Exception as e:
+                    self.logger.log_error(
+                        f"[SELL_PROTECTION] Failed to get portfolio state: {e}. "
+                        f"Blocking SELL order as safety measure."
+                    )
+                    continue
+
+                # SELL order cannot exceed actual holdings (would open short position)
+                # Use 5% tolerance for rounding errors
+                if exchange_long < qty * 0.95:
+                    self.logger.log_error(
+                        f"[SELL_PROTECTION] ❌ CRITICAL: Blocked SELL order due to insufficient holdings! "
+                        f"SELL qty={qty:.6f} > exchange_long={exchange_long:.6f}. "
+                        f"This would open SHORT position in LONG-ONLY mode! "
+                        f"level={level_index}, leg={leg}, price={price:.2f}"
+                    )
+
+                    # Log critical error to database for audit
+                    try:
+                        self._log_db_error(
+                            level="CRITICAL",
+                            message=f"Blocked SELL order: insufficient holdings (would open short)",
+                            component="order_sync",
+                            order_id=None,
+                            details={
+                                "direction": direction,
+                                "level": level_index,
+                                "leg": leg,
+                                "sell_qty": qty,
+                                "exchange_long": exchange_long,
+                                "deficit": qty - exchange_long,
+                                "price": price,
+                            },
+                        )
+                    except Exception:
+                        pass
+
+                    # Skip this order (do NOT place)
+                    continue
+
+                # Warn if SELL order will close most/all of the position
+                if exchange_long > 0 and qty >= exchange_long * 0.9:
+                    self.logger.log_warning(
+                        f"[SELL_PROTECTION] ⚠️  SELL order will close most/all position. "
+                        f"SELL qty={qty:.6f}, exchange_long={exchange_long:.6f} "
+                        f"(ratio={qty/exchange_long*100:.1f}%). level={level_index}"
+                    )
 
             if order_key in open_by_order_key:
                 oo = open_by_order_key[order_key]

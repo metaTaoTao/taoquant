@@ -289,18 +289,18 @@ def generate_grid_levels(
             # Stop if beyond effective support
             break
 
-    # Generate sell levels from buy levels (for 1x spacing pairing)
-    # Each sell_level[i] = buy_level[i] × (1 + spacing_pct)
-    # This creates 1x spacing pairing: buy[i] -> sell[i] = 1 × spacing
-    # 
-    # Note: layers_sell parameter is now redundant since sell_levels are generated
-    # from buy_levels. We keep it for backward compatibility but ignore it.
+    # Generate sell levels (from mid up to resistance)
+    # FIXED: Sell levels should be ABOVE mid price (where we sell high)
+    # NOT based on buy levels (which are below mid)
     sell_levels = []
-    for buy_price in buy_levels:
-        sell_price = buy_price * (1 + spacing_pct)
+    price = mid_price
+    for i in range(layers_sell):
+        # Move up by spacing_pct
+        price = price * (1 + spacing_pct)
+
         # Check if within effective resistance
-        if sell_price <= eff_resistance:
-            sell_levels.append(sell_price)
+        if price <= eff_resistance:
+            sell_levels.append(price)
         else:
             # Stop if beyond effective resistance
             break

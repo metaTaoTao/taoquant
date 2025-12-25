@@ -266,10 +266,10 @@ pytest --cov=analytics --cov=strategies --cov-report=html
 
 ## 📚 Documentation
 
-- **[System Design](docs/system_design.md)** - Architecture overview
-- **[Phase 1 Summary](docs/phase1_completion_summary.md)** - Engine layer
-- **[Phase 2 Summary](docs/phase2_completion_summary.md)** - Strategy layer
-- **[Migration Guide](docs/vector_bt_migration_todo.md)** - VectorBT migration
+- **[System Design](docs/others/system_design.md)** - Architecture overview
+- **[Phase 1 Summary](docs/others/phase1_completion_summary.md)** - Engine layer
+- **[Phase 2 Summary](docs/others/phase2_completion_summary.md)** - Strategy layer
+- **[Migration Guide](docs/others/vector_bt_migration_todo.md)** - VectorBT migration
 
 ---
 
