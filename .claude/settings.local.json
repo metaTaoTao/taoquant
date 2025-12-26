@@ -34,7 +34,8 @@
       "Bash(scp:*)",
       "WebSearch",
       "WebFetch(domain:www.bitget.com)",
-      "WebFetch(domain:github.com)"
+      "WebFetch(domain:github.com)",
+      "Bash(chmod:*)"
     ],
     "deny": [],
     "ask": []

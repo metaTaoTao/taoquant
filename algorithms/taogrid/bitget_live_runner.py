@@ -2336,6 +2336,18 @@ class BitgetLiveRunner:
         try:
             while True:
                 try:
+                    # ENHANCED: Check kill switch before processing
+                    kill_switch_triggered = self._check_kill_switch()
+                    if kill_switch_triggered:
+                        self.logger.log_error(
+                            "[KILL_SWITCH] Emergency stop triggered! Closing all positions and stopping trading."
+                        )
+                        # Force close all positions
+                        self._emergency_close_all_positions()
+                        # Stop the trading loop
+                        self.logger.log_error("[KILL_SWITCH] Trading loop stopped. Remove kill_switch file to resume.")
+                        break
+                    
                     # Get latest bar (use 1m to match grid calculation timeframe)
                     latest_bar = self.data_source.get_latest_bar(self.symbol, "1m")
 
@@ -3485,5 +3497,97 @@ class BitgetLiveRunner:
             tmp = path.with_suffix(".jsonl.tmp")
             tmp.write_text("\n".join(remain) + ("\n" if remain else ""), encoding="utf-8")
             tmp.replace(path)
+    
+    def _check_kill_switch(self) -> bool:
+        """
+        ENHANCED: Check if kill switch file exists.
+        
+        Returns
+        -------
+        bool
+            True if kill switch is triggered, False otherwise
+        """
+        if self.safety_kill_switch_file.exists():
+            return True
+        return False
+    
+    def _emergency_close_all_positions(self) -> None:
+        """
+        ENHANCED: Emergency close all positions when kill switch is triggered.
+        
+        This method:
+        1. Cancels all open orders
+        2. Closes all positions using market orders or Flash Close API
+        3. Logs the emergency action
+        """
+        try:
+            # Cancel all open orders
+            self.logger.log_error("[EMERGENCY_CLOSE] Cancelling all open orders...")
+            try:
+                open_orders = self.execution_engine.get_open_orders(self.symbol)
+                if open_orders:
+                    for order in open_orders:
+                        try:
+                            self.execution_engine.cancel_order(
+                                symbol=self.symbol,
+                                order_id=order.get("order_id") or order.get("id")
+                            )
+                            self.logger.log_warning(f"[EMERGENCY_CLOSE] Cancelled order: {order.get('order_id')}")
+                        except Exception as e:
+                            self.logger.log_error(f"[EMERGENCY_CLOSE] Failed to cancel order {order.get('order_id')}: {e}")
+            except Exception as e:
+                self.logger.log_error(f"[EMERGENCY_CLOSE] Error getting open orders: {e}")
+            
+            # Close all positions
+            self.logger.log_error("[EMERGENCY_CLOSE] Closing all positions...")
+            try:
+                # Get current positions
+                positions = self.execution_engine.get_positions(self.symbol)
+                if positions:
+                    for pos in positions:
+                        try:
+                            pos_size = float(pos.get("size", 0.0))
+                            pos_side = pos.get("side", "long")
+                            if pos_size > 0:
+                                # Use Flash Close API for swap positions
+                                if self.market_type == "swap":
+                                    close_result = self.execution_engine.close_position(
+                                        symbol=self.symbol,
+                                        side=pos_side
+                                    )
+                                    if close_result and close_result.get("success"):
+                                        self.logger.log_warning(
+                                            f"[EMERGENCY_CLOSE] Position closed: {pos_side} {pos_size:.8f} "
+                                            f"order_id={close_result.get('order_id')}"
+                                        )
+                                    else:
+                                        self.logger.log_error(
+                                            f"[EMERGENCY_CLOSE] Failed to close position: {close_result}"
+                                        )
+                                else:
+                                    # For spot, use market order
+                                    if pos_side == "long":
+                                        # Sell to close long
+                                        order_result = self.execution_engine.create_order(
+                                            symbol=self.symbol,
+                                            side="sell",
+                                            order_type="market",
+                                            amount=pos_size
+                                        )
+                                        if order_result:
+                                            self.logger.log_warning(
+                                                f"[EMERGENCY_CLOSE] Market sell order placed: {pos_size:.8f} "
+                                                f"order_id={order_result.get('order_id')}"
+                                            )
+                        except Exception as e:
+                            self.logger.log_error(f"[EMERGENCY_CLOSE] Error closing position: {e}", exc_info=True)
+                else:
+                    self.logger.log_warning("[EMERGENCY_CLOSE] No positions to close")
+            except Exception as e:
+                self.logger.log_error(f"[EMERGENCY_CLOSE] Error getting positions: {e}", exc_info=True)
+            
+            self.logger.log_error("[EMERGENCY_CLOSE] Emergency close completed")
+        except Exception as e:
+            self.logger.log_error(f"[EMERGENCY_CLOSE] Critical error during emergency close: {e}", exc_info=True)
         except Exception:
             return

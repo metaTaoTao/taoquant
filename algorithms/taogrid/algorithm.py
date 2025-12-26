@@ -233,6 +233,26 @@ class TaoGridLeanAlgorithm:
                 f"[{current_time}] [WARNING] GRID SHUTDOWN: {shutdown_reason} "
                 f"(Risk Level: {risk_level})"
             )
+            # ENHANCED: Set shutdown bar index for cooldown period tracking
+            bar_idx = getattr(self, "_current_bar_index", 0) or 0
+            self.grid_manager.set_grid_shutdown_bar_index(bar_idx)
+            
+            # ENHANCED: Force close all positions if position-level stop loss is enabled
+            holdings_btc = float(portfolio_state.get("holdings", 0.0))
+            if holdings_btc > 0:
+                close_order = self.grid_manager.force_close_all_positions(
+                    holdings_btc=holdings_btc,
+                    current_price=current_price,
+                    current_time=current_time,
+                )
+                if close_order:
+                    self._log(
+                        f"[{current_time}] [POSITION_STOP_LOSS] Triggered position-level stop loss. "
+                        f"Closing {holdings_btc:.8f} BTC positions."
+                    )
+                    self._prev_price = current_price
+                    return close_order  # Return close order instruction
+            
             self._prev_price = current_price
             return None  # Grid shutdown, do not place orders
         
@@ -255,19 +275,30 @@ class TaoGridLeanAlgorithm:
         # P1: Forced deleveraging (market sell) on large unrealized losses.
         # This is a safety valve for buy-heavy regimes where inventory can accumulate faster
         # than the grid can rotate out during drawdowns.
+        # ENHANCED: Added Level 3 for complete position closure at 20% loss
         if getattr(self.config, "enable_forced_deleverage", False):
             holdings_btc = float(portfolio_state.get("holdings", 0.0))
             equity = float(portfolio_state.get("equity", self.config.initial_cash))
             unrealized_pnl = float(portfolio_state.get("unrealized_pnl", 0.0))
             if holdings_btc > 0 and equity > 0 and current_price is not None and float(current_price) > 0:
                 unrealized_pnl_pct = unrealized_pnl / equity
-                lvl1 = float(getattr(self.config, "deleverage_level1_unrealized_loss_pct", 0.15))
-                lvl2 = float(getattr(self.config, "deleverage_level2_unrealized_loss_pct", 0.25))
+                lvl1 = float(getattr(self.config, "deleverage_level1_unrealized_loss_pct", 0.10))
+                lvl2 = float(getattr(self.config, "deleverage_level2_unrealized_loss_pct", 0.15))
+                # ENHANCED: Level 3 - complete position closure
+                lvl3 = float(getattr(self.config, "deleverage_level3_unrealized_loss_pct", 0.20))
                 sell_frac = 0.0
-                if unrealized_pnl_pct <= -lvl2:
+                reason_suffix = ""
+                
+                if unrealized_pnl_pct <= -lvl3:
+                    # ENHANCED: Level 3 - complete closure (100%)
+                    sell_frac = float(getattr(self.config, "deleverage_level3_sell_frac", 1.0))
+                    reason_suffix = f"Level 3 (complete closure at {lvl3:.0%})"
+                elif unrealized_pnl_pct <= -lvl2:
                     sell_frac = float(getattr(self.config, "deleverage_level2_sell_frac", 0.50))
+                    reason_suffix = f"Level 2 (at {lvl2:.0%})"
                 elif unrealized_pnl_pct <= -lvl1:
                     sell_frac = float(getattr(self.config, "deleverage_level1_sell_frac", 0.25))
+                    reason_suffix = f"Level 1 (at {lvl1:.0%})"
 
                 # Optional: also trigger on cost-basis drawdown (same threshold as cost risk zone)
                 if sell_frac == 0.0 and getattr(self.config, "enable_cost_basis_risk_zone", False):
@@ -276,6 +307,7 @@ class TaoGridLeanAlgorithm:
                         cost_trigger = float(getattr(self.config, "cost_risk_trigger_pct", 0.03))
                         if float(current_price) <= float(avg_cost) * (1.0 - cost_trigger):
                             sell_frac = float(getattr(self.config, "deleverage_level1_sell_frac", 0.25))
+                            reason_suffix = "Level 1 (cost-basis trigger)"
 
                 # Cooldown to avoid repeated selling every bar
                 bar_idx = getattr(self, "_current_bar_index", 0) or 0
@@ -293,7 +325,7 @@ class TaoGridLeanAlgorithm:
                                 "quantity": qty,
                                 "price": None,   # market execution in runner
                                 "level": -1,     # sentinel: not a grid level
-                                "reason": f"Forced deleverage (unrealized_pnl_pct={unrealized_pnl_pct:.2%})",
+                                "reason": f"Forced deleverage {reason_suffix} (unrealized_pnl_pct={unrealized_pnl_pct:.2%})",
                                 "timestamp": current_time,
                             }
 

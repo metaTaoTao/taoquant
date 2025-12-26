@@ -482,9 +482,11 @@ class SimpleLeanRunner:
 
                 # Log order received
                 if getattr(self.config, "enable_console_log", False):
+                    price_str = f"${order['price']:,.0f}" if order.get('price') is not None else "MARKET"
+                    level_str = f"L{order['level']+1}" if order.get('level') is not None and order['level'] >= 0 else "MARKET"
                     print(
                         f"[ORDER_EXECUTE] Received {order['direction'].upper()} "
-                        f"L{order['level']+1} @ ${order['price']:,.0f}, size={order['quantity']:.4f} BTC"
+                        f"{level_str} @ {price_str}, size={order['quantity']:.4f} BTC"
                     )
 
                 executed = self.execute_order(order, bar_open=row['open'], market_price=row['close'], timestamp=timestamp)

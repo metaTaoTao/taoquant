@@ -137,6 +137,9 @@ class GridManager:
         self.risk_zone_entry_time: Optional[datetime] = None  # When entered risk zone
         self.grid_shutdown_reason: Optional[str] = None  # Reason for grid shutdown
         self.realized_pnl: float = 0.0  # Track realized profits for profit buffer
+        # ENHANCED: Track grid shutdown time for cooldown period
+        self.grid_shutdown_time: Optional[datetime] = None  # When grid was shut down
+        self.grid_shutdown_bar_index: Optional[int] = None  # Bar index when grid was shut down
 
     def setup_grid(self, historical_data: pd.DataFrame) -> None:
         """
@@ -1333,13 +1336,91 @@ class GridManager:
         if should_shutdown and self.grid_enabled:
             self.grid_enabled = False
             self.grid_shutdown_reason = shutdown_reason
+            # ENHANCED: Track shutdown time for cooldown period
+            self.grid_shutdown_time = current_time if current_time else datetime.now()
+            # Note: grid_shutdown_bar_index should be set by caller (algorithm.py)
         elif not should_shutdown and not self.grid_enabled:
-            # Auto re-enable grid when risk conditions improve
-            self.grid_enabled = True
-            self.grid_shutdown_reason = None
-            self.risk_zone_entry_time = None
+            # ENHANCED: Auto re-enable with cooldown and price recovery verification
+            can_re_enable = self._can_re_enable_grid(current_price, current_time)
+            if can_re_enable:
+                self.grid_enabled = True
+                self.grid_shutdown_reason = None
+                self.risk_zone_entry_time = None
+                self.grid_shutdown_time = None
+                self.grid_shutdown_bar_index = None
         
         return risk_level, should_shutdown, shutdown_reason
+    
+    def _can_re_enable_grid(
+        self,
+        current_price: float,
+        current_time: Optional[datetime] = None,
+    ) -> bool:
+        """
+        ENHANCED: Check if grid can be re-enabled after shutdown.
+        
+        Conditions:
+        1. Cooldown period must have elapsed (if configured)
+        2. Price must have recovered to support + recovery_threshold × ATR (if configured)
+        3. Manual approval may be required (if configured)
+        
+        Parameters
+        ----------
+        current_price : float
+            Current market price
+        current_time : Optional[datetime]
+            Current timestamp
+            
+        Returns
+        -------
+        bool
+            True if grid can be re-enabled, False otherwise
+        """
+        # If grid is already enabled, no need to check
+        if self.grid_enabled:
+            return True
+        
+        # Check cooldown period
+        cooldown_bars = getattr(self.config, "grid_re_enable_cooldown_bars", 1440)
+        if cooldown_bars > 0 and self.grid_shutdown_bar_index is not None:
+            # Get current bar index from caller (should be passed via check_risk_level)
+            # For now, we'll use time-based check if bar_index is not available
+            if self.grid_shutdown_time is not None:
+                time_elapsed = (current_time if current_time else datetime.now()) - self.grid_shutdown_time
+                # Approximate: 1 bar = 1 minute for 1m timeframe
+                bars_elapsed = int(time_elapsed.total_seconds() / 60)
+                if bars_elapsed < cooldown_bars:
+                    return False  # Cooldown not expired
+        
+        # Check price recovery
+        recovery_atr_mult = getattr(self.config, "grid_re_enable_price_recovery_atr_mult", 1.0)
+        if recovery_atr_mult > 0:
+            recovery_threshold = self.config.support + (recovery_atr_mult * self.current_atr)
+            if current_price < recovery_threshold:
+                return False  # Price has not recovered
+        
+        # Check manual approval requirement
+        requires_approval = getattr(self.config, "grid_re_enable_requires_manual_approval", False)
+        if requires_approval:
+            # Manual approval would be checked externally (e.g., via file or API)
+            # For now, we assume manual approval is granted if this method is called
+            # In practice, the caller should check for manual approval before calling
+            pass
+        
+        return True
+    
+    def set_grid_shutdown_bar_index(self, bar_index: int) -> None:
+        """
+        ENHANCED: Set the bar index when grid was shut down.
+        
+        This is used for cooldown period calculation.
+        
+        Parameters
+        ----------
+        bar_index : int
+            Bar index when grid was shut down
+        """
+        self.grid_shutdown_bar_index = bar_index
     
     def enable_grid(self) -> None:
         """Manually re-enable grid after shutdown."""
@@ -1372,4 +1453,58 @@ class GridManager:
             "risk_level": self.risk_level,
             "grid_enabled": self.grid_enabled,
             "grid_shutdown_reason": self.grid_shutdown_reason,
+        }
+    
+    def force_close_all_positions(
+        self,
+        holdings_btc: float,
+        current_price: float,
+        current_time: Optional[datetime] = None,
+    ) -> Optional[dict]:
+        """
+        ENHANCED: Force close all positions (position-level stop loss).
+        
+        This method is called when Level 4 risk is detected and 
+        enable_position_level_stop_loss is True. It returns a market order
+        instruction to close all positions immediately.
+        
+        Parameters
+        ----------
+        holdings_btc : float
+            Current holdings in BTC
+        current_price : float
+            Current market price
+        current_time : Optional[datetime]
+            Current timestamp
+            
+        Returns
+        -------
+        Optional[dict]
+            Order instruction dict if positions need to be closed, None otherwise.
+            Format: {
+                "direction": "sell",
+                "quantity": holdings_btc,
+                "price": None,  # Market order
+                "level": -1,  # Not a grid level
+                "reason": "Position-level stop loss triggered",
+                "timestamp": current_time,
+            }
+        """
+        # Check if position-level stop loss is enabled
+        if not getattr(self.config, "enable_position_level_stop_loss", True):
+            return None
+        
+        # Only close if we have positions
+        if holdings_btc <= 0:
+            return None
+        
+        # Return market order instruction to close all positions
+        return {
+            "symbol": getattr(self.config, "symbol", "BTCUSDT"),
+            "direction": "sell",
+            "quantity": holdings_btc,
+            "price": None,  # Market order - immediate execution
+            "level": -1,  # Sentinel: not a grid level
+            "reason": f"Position-level stop loss triggered (risk_level=4, reason={self.grid_shutdown_reason})",
+            "timestamp": current_time if current_time else datetime.now(),
         }

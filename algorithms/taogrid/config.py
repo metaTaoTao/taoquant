@@ -91,13 +91,17 @@ class TaoGridLeanConfig:
     # When inventory is already accumulated, "stop buying" is not enough to cap drawdown.
     # This optional protection will issue a market SELL to reduce holdings when unrealized loss
     # exceeds thresholds. Use with caution in live trading (it realizes losses).
-    enable_forced_deleverage: bool = False
-    deleverage_level1_unrealized_loss_pct: float = 0.15
-    deleverage_level2_unrealized_loss_pct: float = 0.25
+    # ENHANCED: Default enabled, lower thresholds, added Level 3 for complete position closure
+    enable_forced_deleverage: bool = True  # ENHANCED: Default enabled for survival
+    deleverage_level1_unrealized_loss_pct: float = 0.10  # ENHANCED: Lowered from 0.15 to 0.10
+    deleverage_level2_unrealized_loss_pct: float = 0.15  # ENHANCED: Lowered from 0.25 to 0.15
     deleverage_level1_sell_frac: float = 0.25
     deleverage_level2_sell_frac: float = 0.50
     deleverage_cooldown_bars: int = 60  # on 1m bars: 60 = 1 hour
     deleverage_min_notional_usd: float = 2000.0
+    # ENHANCED: Level 3 - Complete position closure at 20% unrealized loss
+    deleverage_level3_unrealized_loss_pct: float = 0.20  # Complete closure threshold
+    deleverage_level3_sell_frac: float = 1.0  # 100% position closure
 
     # === Optional: Short leg ONLY in BEARISH regime (manual trader decision) ===
     # Default remains long-only. If enabled and regime == BEARISH_RANGE, the grid will:
@@ -209,10 +213,19 @@ class TaoGridLeanConfig:
     
     # Level 4 (Extreme Risk - Grid Shutdown):
     # Grid will be completely disabled if any of these conditions are met
-    max_risk_atr_mult: float = 3.0  # Price depth: support - 3 × ATR
-    max_risk_loss_pct: float = 0.30  # Unrealized loss: -30% equity
+    # ENHANCED: Lower thresholds for earlier protection, especially in 90% drawdown scenarios
+    max_risk_atr_mult: float = 2.0  # ENHANCED: Lowered from 3.0 to 2.0 (earlier shutdown)
+    max_risk_loss_pct: float = 0.20  # ENHANCED: Lowered from 0.30 to 0.20 (earlier shutdown)
     max_risk_inventory_pct: float = 0.8  # Inventory risk: 80% capacity
-    # Note: Grid stays disabled until manually re-enabled by user
+    # ENHANCED: Daily drawdown threshold for flash crash protection
+    max_daily_drawdown_pct: float = 0.20  # Shutdown if daily drawdown > 20%
+    # ENHANCED: Position-level stop loss - force close all positions when grid shuts down
+    enable_position_level_stop_loss: bool = True  # Force close positions on Level 4 shutdown
+    # ENHANCED: Grid re-enable protection
+    grid_re_enable_cooldown_bars: int = 1440  # 24 hours cooldown (1440 × 1m bars)
+    grid_re_enable_price_recovery_atr_mult: float = 1.0  # Price must recover to support + 1×ATR
+    grid_re_enable_requires_manual_approval: bool = False  # Optional: require manual approval
+    # Note: Grid stays disabled until cooldown expires AND price recovers (or manual approval)
     
     # Profit Protection: use realized profits to buffer risk threshold
     enable_profit_buffer: bool = True  # Enable profit buffer
@@ -433,6 +446,17 @@ class TaoGridLeanConfig:
             raise ValueError("max_risk_loss_pct must be in (0, 1]")
         if not (0.0 < self.max_risk_inventory_pct <= 1.0):
             raise ValueError("max_risk_inventory_pct must be in (0, 1]")
+        # ENHANCED: Validate new parameters
+        if not (0.0 < self.max_daily_drawdown_pct <= 1.0):
+            raise ValueError("max_daily_drawdown_pct must be in (0, 1]")
+        if self.grid_re_enable_cooldown_bars < 0:
+            raise ValueError("grid_re_enable_cooldown_bars must be >= 0")
+        if self.grid_re_enable_price_recovery_atr_mult <= 0:
+            raise ValueError("grid_re_enable_price_recovery_atr_mult must be > 0")
+        if not (0.0 < self.deleverage_level3_unrealized_loss_pct <= 1.0):
+            raise ValueError("deleverage_level3_unrealized_loss_pct must be in (0, 1]")
+        if not (0.0 < self.deleverage_level3_sell_frac <= 1.0):
+            raise ValueError("deleverage_level3_sell_frac must be in (0, 1]")
         if not (0.0 <= self.profit_buffer_ratio <= 1.0):
             raise ValueError("profit_buffer_ratio must be in [0, 1]")
 

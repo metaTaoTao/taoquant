@@ -289,21 +289,21 @@ def generate_grid_levels(
             # Stop if beyond effective support
             break
 
-    # Generate sell levels (from mid up to resistance)
-    # FIXED: Sell levels should be ABOVE mid price (where we sell high)
-    # NOT based on buy levels (which are below mid)
+    # Generate sell levels based on buy levels (1x spacing pairing)
+    # CRITICAL FIX (2025-12-26): SELL[i] = BUY[i] * (1 + spacing_pct)
+    # This ensures BUY-SELL pairing has exactly 1x spacing (e.g., 0.3%)
+    # Previous bug: SELL levels generated from mid caused huge spacing (e.g., 4.6%)
+    #   Example: BUY[8] @ 87000, SELL[8] @ 91000 (4000 gap, wrong!)
+    #   Fixed:   BUY[8] @ 87000, SELL[8] @ 87261 (261 gap, correct!)
     sell_levels = []
-    price = mid_price
-    for i in range(layers_sell):
-        # Move up by spacing_pct
-        price = price * (1 + spacing_pct)
+    for buy_price in buy_levels:
+        sell_price = buy_price * (1 + spacing_pct)
 
         # Check if within effective resistance
-        if price <= eff_resistance:
-            sell_levels.append(price)
-        else:
-            # Stop if beyond effective resistance
-            break
+        if sell_price <= eff_resistance:
+            sell_levels.append(sell_price)
+        # Note: We don't break here - continue for all buy levels
+        # This ensures sell_levels has same length as buy_levels for pairing
 
     return {
         "buy_levels": np.array(buy_levels),
